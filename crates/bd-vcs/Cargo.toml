@@ -1,0 +1,18 @@
+[package]
+name = "bd-vcs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bd-core.workspace = true
+gix.workspace = true
+glob.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

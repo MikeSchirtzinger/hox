@@ -1,0 +1,24 @@
+# Rust
+/target
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
+.env
+.env.local
+
+# Testing
+*.profraw
+*.gcda
+*.gcno
+*.backup

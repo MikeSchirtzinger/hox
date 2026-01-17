@@ -1,0 +1,31 @@
+[package]
+name = "bd-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bd-core.workspace = true
+bd-storage.workspace = true
+notify.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+regex = "1.10"
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+axum = { version = "0.7", optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+
+[features]
+default = []
+dashboard = ["dep:axum", "dep:tower", "dep:tower-http", "dep:serde", "dep:serde_json"]
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
