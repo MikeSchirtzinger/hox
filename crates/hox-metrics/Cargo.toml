@@ -1,0 +1,28 @@
+[package]
+name = "hox-metrics"
+description = "Observability and telemetry for Hox orchestration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+turso = ["dep:turso"]
+# surrealdb feature can be added later
+
+[dependencies]
+hox-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+# Optional external storage
+turso = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

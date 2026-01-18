@@ -1,0 +1,149 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║          LOGGING & METRICS INVENTORY - HOX WORKSPACE SUMMARY               ║
+║                          2026-01-17 AUDIT REPORT                           ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+QUICK STATS
+═══════════════════════════════════════════════════════════════════════════
+
+📊 Files Audited:         29 Rust source files
+📦 Crates:                6 (bd-core, bd-storage, bd-vcs, bd-daemon, bd-cli, bd-orchestrator)
+📈 Total Lines of Code:   ~5,700 lines analyzed
+
+LOGGING BY THE NUMBERS
+═══════════════════════════════════════════════════════════════════════════
+
+  debug!:     44 statements
+  info!:      52 statements
+  warn!:      23 statements
+  error!:     22 statements
+  trace!:      0 statements (NOT USED)
+  ─────────────────────────
+  TOTAL:     141 structured logs (tracing crate)
+
+  println!:  169 statements (UI output)
+  eprintln!:   2 statements
+  ─────────────────────────
+  TOTAL:     312 log/print statements
+
+TOP CONTRIBUTORS (Structured Logging)
+═══════════════════════════════════════════════════════════════════════════
+
+  ✓ bd-daemon/src/lib.rs ..................... 52 statements (EXCELLENT)
+  ✓ bd-storage/src/sync.rs ................... 29 statements (GOOD)
+  ✓ bd-storage/src/dep_io.rs ................. 13 statements (GOOD)
+  ✓ bd-vcs/src/git.rs ........................ 10 statements (DECENT)
+  ⚠ bd-storage/src/task_io.rs ................. 8 statements (OK)
+  ⚠ bd-vcs/src/lib.rs ......................... 7 statements (OK)
+  ⚠ bd-daemon/src/oplog.rs .................... 7 statements (OK)
+  ✗ bd-cli/src/main.rs ....................... 1 statement (CRITICAL GAP)
+
+CRITICAL GAPS (No Structured Logging)
+═══════════════════════════════════════════════════════════════════════════
+
+  🔴 bd-orchestrator/src/jj.rs ........... 326 lines (JJ subprocess execution)
+  🔴 bd-storage/src/db.rs ............... 856 lines (Database operations)
+  🔴 bd-orchestrator/src/task.rs ........ 643 lines (Task state management)
+  🟡 bd-orchestrator/src/revsets.rs ..... 429 lines (Revset parsing)
+  🟡 bd-orchestrator/src/types.rs ....... 528 lines (Type definitions)
+  🟡 bd-core/src/types.rs ............. 1,244 lines (Core types)
+
+  Total: 17 files with ZERO structured logging
+
+ERROR HANDLING PATTERNS
+═══════════════════════════════════════════════════════════════════════════
+
+  ? operator (silent errors):   334 instances ⚠️  High volume
+  if let patterns:              113 instances ✓  Good for graceful handling
+  match patterns:                69 instances ✓  Error context preservation
+  .map_err() conversions:         60 instances ✓  Custom error context
+
+  🚨 PROBLEM: 334 instances of silent error propagation (? operator)
+             Most critical errors have NO logging context
+
+METRICS INFRASTRUCTURE
+═══════════════════════════════════════════════════════════════════════════
+
+  Prometheus integration:        ✗ Not implemented
+  StatsD integration:            ✗ Not implemented
+  Custom metrics:                ⚠️  Minimal (12 found)
+  Timing measurements:           ⚠️  Partial (60 Instant/Duration uses)
+  Trace IDs/Correlation IDs:     ✗ Not implemented
+  Span-based tracing:            ✗ Not implemented (no OpenTelemetry)
+  JSON structured logging:       ⚠️  Partial (22 serde_json uses)
+
+OBSERVABILITY SCORE
+═══════════════════════════════════════════════════════════════════════════
+
+  Logging Coverage:              6/10 ⚠️
+  Error Logging:                 4/10 ✗
+  Metrics Collection:            0/10 ✗
+  Tracing/Correlation:           0/10 ✗
+  Performance Visibility:        4/10 ⚠️
+  ─────────────────
+  OVERALL:                      3.2/10 (Below Production Standard)
+
+BIGGEST PROBLEMS
+═══════════════════════════════════════════════════════════════════════════
+
+  1️⃣  No logging in JJ subprocess execution (jj.rs)
+      └─ Can't debug failed jj operations
+
+  2️⃣  No logging in database layer (db.rs)
+      └─ Database failures completely invisible
+
+  3️⃣  No logging in task state mutations (task.rs)
+      └─ Can't track task lifecycle
+
+  4️⃣  No request correlation IDs
+      └─ Can't link related operations across async boundaries
+
+  5️⃣  No metrics collection
+      └─ Can't measure performance or error rates
+
+TOP RECOMMENDATIONS (Ranked)
+═══════════════════════════════════════════════════════════════════════════
+
+  CRITICAL (Week 1):
+    [ ] Add logging to bd-orchestrator/src/jj.rs
+    [ ] Add logging to bd-storage/src/db.rs
+    [ ] Add logging to bd-orchestrator/src/task.rs
+
+  HIGH (Week 2):
+    [ ] Add request correlation IDs (UUID per CLI invocation)
+    [ ] Wrap ? operators with context logging
+    [ ] Add error::from_context() helper
+
+  MEDIUM (Week 3):
+    [ ] Implement basic metrics (counters, gauges)
+    [ ] Add OpenTelemetry spans for async boundaries
+    [ ] Create test logging utilities
+
+  LOW (Week 4):
+    [ ] Add Prometheus exporter endpoint
+    [ ] Implement trace ID propagation
+    [ ] Health check endpoint for daemon
+
+QUICK WINS
+═══════════════════════════════════════════════════════════════════════════
+
+  ✓ Logging infrastructure exists (tracing + tracing-subscriber)
+  ✓ RUST_LOG environment variable works
+  ✓ Structured fields already being used (partial)
+  ✓ Good error patterns in sync.rs (can be copied)
+
+  To enable: RUST_LOG=debug beads <command>
+
+FINAL NOTES
+═══════════════════════════════════════════════════════════════════════════
+
+This workspace is at "Development" observability level. For production:
+
+- Add 200-300 more log statements (critical paths)
+- Implement metrics collection (at least counters)
+- Add request tracing across components
+- Set up centralized logging (if distributed)
+
+Current state: Suitable for development, insufficient for production.
+
+═══════════════════════════════════════════════════════════════════════════

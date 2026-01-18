@@ -1,152 +1,124 @@
-//! Demonstration of the bd-core types and their JSON serialization.
+//! Demonstration of the bd-core JJ-native types.
 //!
-//! This example shows how to create and serialize Issue, Dependency, and Comment
-//! types, verifying JSONL compatibility with the Go implementation.
+//! This example shows how to create and use Task, HandoffContext, and AgentHandoff
+//! types for JJ-native task orchestration.
 
-use bd_core::*;
-use chrono::Utc;
+use bd_core::{AgentHandoff, HandoffContext, Priority, Task, TaskMetadata, TaskStatus};
 
 fn main() {
-    println!("=== jj-beads-rs Types Demo ===\n");
+    println!("=== hox JJ-Native Types Demo ===\n");
 
-    // Create a sample issue
-    let mut issue = Issue {
-        id: "task-001".to_string(),
-        content_hash: String::new(),
-        title: "Implement user authentication".to_string(),
-        description: Some("Add JWT-based authentication to the API".to_string()),
-        design: None,
-        acceptance_criteria: Some("- Users can log in\n- JWT tokens are issued\n- Tokens expire after 24h".to_string()),
-        notes: None,
-        status: Some(Status::InProgress),
-        priority: 1, // P1 - High priority
-        issue_type: Some(IssueType::Feature),
-        assignee: Some("engineer@example.com".to_string()),
-        estimated_minutes: Some(240), // 4 hours
-        created_at: Utc::now(),
-        created_by: Some("architect@example.com".to_string()),
-        updated_at: Utc::now(),
-        closed_at: None,
-        close_reason: None,
-        closed_by_session: None,
-        due_at: None,
-        defer_until: None,
-        external_ref: Some("gh-123".to_string()),
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        source_repo: String::new(),
-        id_prefix: String::new(),
-        labels: Some(vec!["authentication".to_string(), "security".to_string()]),
-        dependencies: None,
-        comments: None,
-        deleted_at: None,
-        deleted_by: None,
-        delete_reason: None,
-        original_type: None,
-        sender: None,
-        ephemeral: None,
-        pinned: None,
-        is_template: None,
-        bonded_from: None,
-        creator: Some(EntityRef {
-            name: Some("Alice Engineer".to_string()),
-            platform: Some("github".to_string()),
-            org: Some("example-org".to_string()),
-            id: Some("alice-123".to_string()),
-        }),
-        validations: None,
-        await_type: None,
-        await_id: None,
-        timeout: None,
-        waiters: None,
-        holder: None,
-        source_formula: None,
-        source_location: None,
-        hook_bead: None,
-        role_bead: None,
-        agent_state: None,
-        last_activity: None,
-        role_type: None,
-        rig: None,
-        mol_type: None,
-        event_kind: None,
-        actor: None,
-        target: None,
-        payload: None,
-    };
+    // Create a task (represents a jj change)
+    let mut task = Task::new("xyzabc12", "Implement user authentication");
+    task.description = Some("Add JWT-based authentication to the API".to_string());
+    task.status = TaskStatus::InProgress;
+    task.priority = Priority::High;
+    task.agent = Some("agent-001".to_string());
+    task.bookmark = Some("task/auth-feature".to_string());
+    task.labels = vec!["authentication".to_string(), "security".to_string()];
 
-    // Validate the issue
-    match issue.validate() {
-        Ok(_) => println!("✓ Issue validation passed"),
-        Err(e) => println!("✗ Issue validation failed: {}", e),
+    // Validate the task
+    match task.validate() {
+        Ok(_) => println!("[OK] Task validation passed"),
+        Err(e) => println!("[ERR] Task validation failed: {}", e),
     }
 
-    // Compute content hash
-    let hash = issue.compute_content_hash();
-    issue.content_hash = hash.clone();
-    println!("✓ Content hash: {}...", &hash[..16]);
-
-    // Serialize to JSON (JSONL compatible)
-    let json = serde_json::to_string_pretty(&issue).expect("Failed to serialize issue");
-    println!("\n=== Issue JSON ===");
+    // Serialize to JSON
+    let json = serde_json::to_string_pretty(&task).expect("Failed to serialize task");
+    println!("\n=== Task JSON ===");
     println!("{}\n", json);
 
-    // Create a dependency
-    let dep = Dependency {
-        issue_id: "task-001".to_string(),
-        depends_on_id: "task-000".to_string(),
-        dep_type: DependencyType::Blocks,
-        created_at: Utc::now(),
-        created_by: Some("system".to_string()),
-        metadata: None,
-        thread_id: None,
-    };
+    // Create handoff context (for agent transitions)
+    let mut context = HandoffContext::new("Working on JWT token generation");
+    context.add_progress("Set up auth middleware");
+    context.add_progress("Implemented login endpoint");
+    context.add_next_step("Add token refresh endpoint");
+    context.add_next_step("Write integration tests");
+    context.add_blocker("Waiting for secret key configuration");
+    context.add_file("src/auth/mod.rs");
+    context.add_file("src/auth/jwt.rs");
 
-    println!("=== Dependency JSON ===");
-    let dep_json = serde_json::to_string_pretty(&dep).expect("Failed to serialize dependency");
-    println!("{}\n", dep_json);
+    // Attach context to task
+    task.context = Some(context.clone());
 
-    // Create a comment
-    let comment = Comment {
-        id: 1,
-        issue_id: "task-001".to_string(),
-        author: "reviewer@example.com".to_string(),
-        text: "LGTM - looks good to proceed".to_string(),
-        created_at: Utc::now(),
-    };
+    println!("=== Handoff Context JSON ===");
+    let ctx_json = serde_json::to_string_pretty(&context).expect("Failed to serialize context");
+    println!("{}\n", ctx_json);
 
-    println!("=== Comment JSON ===");
-    let comment_json = serde_json::to_string_pretty(&comment).expect("Failed to serialize comment");
-    println!("{}\n", comment_json);
+    // Format task as jj change description
+    println!("=== JJ Change Description ===");
+    let description = task.format_description();
+    println!("{}\n", description);
 
-    // Test dependency type logic
-    println!("=== Dependency Type Tests ===");
-    println!("Blocks affects ready work: {}", DependencyType::Blocks.affects_ready_work());
-    println!("Related affects ready work: {}", DependencyType::Related.affects_ready_work());
-    println!("ParentChild affects ready work: {}", DependencyType::ParentChild.affects_ready_work());
+    // Create agent handoff (for complete task takeover)
+    let mut handoff = AgentHandoff::new(task.clone());
+    handoff.diff = r#"+pub fn generate_token(user: &User) -> Result<String, Error> {
++    let claims = Claims::new(user.id);
++    encode(&Header::default(), &claims, &KEYS.encoding)
++}
+"#
+    .to_string();
+    handoff.parent_changes = vec!["abc12345".to_string(), "def67890".to_string()];
 
-    // Test failure close detection
-    println!("\n=== Failure Close Tests ===");
-    println!("'failed to complete' is failure: {}", is_failure_close("failed to complete"));
-    println!("'completed successfully' is failure: {}", is_failure_close("completed successfully"));
-    println!("'wontfix' is failure: {}", is_failure_close("wontfix"));
+    println!("=== Agent Handoff Format ===");
+    let handoff_prompt = handoff.format_for_agent();
+    println!("{}\n", handoff_prompt);
 
-    // Test EntityRef URI
-    println!("\n=== EntityRef URI Tests ===");
-    if let Some(ref creator) = issue.creator {
-        if let Some(uri) = creator.uri() {
-            println!("Creator URI: {}", uri);
-            match EntityRef::parse_uri(&uri) {
-                Ok(parsed) => println!("✓ Successfully parsed URI back to EntityRef"),
-                Err(e) => println!("✗ Failed to parse URI: {}", e),
-            }
-        }
-    }
+    // Create task metadata (for .tasks/metadata.jsonl)
+    let mut metadata = TaskMetadata::new("xyzabc12");
+    metadata.priority = Priority::High;
+    metadata.labels = vec!["authentication".to_string()];
+    metadata.agent = Some("agent-001".to_string());
 
-    println!("\n=== Type Information ===");
-    println!("Issue has {} fields (30+ from Go version)", std::mem::size_of::<Issue>());
-    println!("All core enums (Status, IssueType, DependencyType, AgentState, MolType) implemented");
-    println!("Full JSONL compatibility with Go implementation verified");
+    println!("=== Task Metadata JSON ===");
+    let meta_json = serde_json::to_string_pretty(&metadata).expect("Failed to serialize metadata");
+    println!("{}\n", meta_json);
+
+    // Demonstrate status transitions
+    println!("=== Status Information ===");
+    println!("TaskStatus::Open is actionable: {}", TaskStatus::Open.is_actionable());
+    println!(
+        "TaskStatus::InProgress is actionable: {}",
+        TaskStatus::InProgress.is_actionable()
+    );
+    println!(
+        "TaskStatus::Done is terminal: {}",
+        TaskStatus::Done.is_terminal()
+    );
+    println!(
+        "TaskStatus::Abandoned is terminal: {}",
+        TaskStatus::Abandoned.is_terminal()
+    );
+
+    // Demonstrate priority ordering
+    println!("\n=== Priority Ordering ===");
+    println!(
+        "Critical < High: {}",
+        Priority::Critical < Priority::High
+    );
+    println!("High < Medium: {}", Priority::High < Priority::Medium);
+    println!("Medium < Low: {}", Priority::Medium < Priority::Low);
+
+    // Demonstrate string parsing
+    println!("\n=== String Parsing ===");
+    println!("'wip' -> {:?}", "wip".parse::<TaskStatus>());
+    println!("'p0' -> {:?}", "p0".parse::<Priority>());
+    println!("'completed' -> {:?}", "completed".parse::<TaskStatus>());
+
+    // Show type sizes (should be MUCH smaller than old Issue)
+    println!("\n=== Type Sizes ===");
+    println!(
+        "Task: {} bytes (vs 1000+ for old Issue)",
+        std::mem::size_of::<Task>()
+    );
+    println!("HandoffContext: {} bytes", std::mem::size_of::<HandoffContext>());
+    println!("TaskMetadata: {} bytes", std::mem::size_of::<TaskMetadata>());
+    println!("TaskStatus: {} bytes", std::mem::size_of::<TaskStatus>());
+    println!("Priority: {} bytes", std::mem::size_of::<Priority>());
+
+    println!("\n=== JJ-Native Paradigm ===");
+    println!("- Tasks ARE jj changes (change_id is primary key)");
+    println!("- Dependencies ARE ancestry in jj DAG");
+    println!("- Assignments ARE bookmarks");
+    println!("- No separate SQLite dependency graph needed!");
 }

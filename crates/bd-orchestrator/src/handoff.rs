@@ -3,12 +3,11 @@
 //! This module provides HandoffGenerator for creating structured handoff context
 //! that enables seamless agent transitions with full task context preservation.
 
-use crate::types::{AgentHandoff, ChangeEntry, HandoffContext, HandoffSummary, Priority, Task, TaskMetadata, TaskStatus};
-use anyhow::{Context as AnyhowContext, Result};
-use chrono::Utc;
+use crate::types::{AgentHandoff, ChangeEntry, HandoffContext, HandoffSummary, Priority, Task, TaskStatus};
+use bd_core::{HoxError, Result};
 use std::process::Command;
 use std::str::FromStr;
-use tracing::{debug, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// HandoffGenerator creates structured handoff context for agent transitions.
 pub struct HandoffGenerator {
@@ -25,26 +24,21 @@ impl HandoffGenerator {
 
     /// Generate handoff context from a task's current state.
     /// This would typically be called by a summarization model (e.g., Haiku).
+    #[instrument(skip(self, summary), fields(change_id))]
     pub async fn generate_handoff(
         &self,
         change_id: &str,
         summary: HandoffSummary,
     ) -> Result<()> {
-        let handoff = HandoffContext {
-            current_focus: summary.current_focus,
-            progress: summary.progress,
-            next_steps: summary.next_steps,
-            blockers: if summary.blockers.is_empty() { None } else { Some(summary.blockers) },
-            open_questions: if summary.open_questions.is_empty() { None } else { Some(summary.open_questions) },
-            files_touched: if summary.files_touched.is_empty() { None } else { Some(summary.files_touched) },
-            updated_at: Utc::now(),
-        };
-
+        info!("Generating handoff context");
+        let handoff = summary.into_context();
         self.update_handoff(change_id, &handoff).await
     }
 
     /// Load handoff context for a task.
+    #[instrument(skip(self), fields(change_id))]
     pub async fn load_handoff(&self, change_id: &str) -> Result<HandoffContext> {
+        debug!("Loading handoff context");
         let desc = self.exec_jj(&[
             "log",
             "-r",
@@ -56,26 +50,30 @@ impl HandoffGenerator {
             "description",
         ])
         .await
-        .context("failed to get description")?;
+        .map_err(|e| HoxError::JjError(format!("failed to get description: {}", e)))?;
 
         let task = self.parse_description(&desc)?;
 
         task.context
-            .ok_or_else(|| anyhow::anyhow!("no handoff context found for change {}", change_id))
+            .ok_or_else(|| HoxError::Parse(format!("no handoff context found for change {}", change_id)))
     }
 
     /// Get cumulative diff for a change (for new agent context).
+    #[instrument(skip(self), fields(change_id))]
     pub async fn get_diff(&self, change_id: &str) -> Result<String> {
+        debug!("Getting cumulative diff");
         let output = self
             .exec_jj(&["diff", "-r", &format!("root()..{}", change_id)])
             .await
-            .context("failed to get diff")?;
+            .map_err(|e| HoxError::JjError(format!("failed to get diff: {}", e)))?;
 
         Ok(output)
     }
 
     /// Get change history for context.
+    #[instrument(skip(self), fields(change_id))]
     pub async fn get_change_log(&self, change_id: &str) -> Result<Vec<ChangeEntry>> {
+        debug!("Getting change log");
         let output = self
             .exec_jj(&[
                 "log",
@@ -86,7 +84,7 @@ impl HandoffGenerator {
                 r#"change_id ++ "|" ++ description.first_line() ++ "\n""#,
             ])
             .await
-            .context("failed to get change log")?;
+            .map_err(|e| HoxError::JjError(format!("failed to get change log: {}", e)))?;
 
         let mut entries = Vec::new();
         for line in output.lines() {
@@ -110,7 +108,10 @@ impl HandoffGenerator {
     }
 
     /// Prepare complete handoff context for a new agent taking over a task.
+    #[instrument(skip(self), fields(change_id))]
     pub async fn prepare_handoff(&self, change_id: &str) -> Result<AgentHandoff> {
+        info!("Preparing complete handoff package");
+
         // Get task description
         let desc = self
             .exec_jj(&[
@@ -124,7 +125,7 @@ impl HandoffGenerator {
                 "description",
             ])
             .await
-            .context("failed to get description")?;
+            .map_err(|e| HoxError::JjError(format!("failed to get description: {}", e)))?;
 
         let mut task = self.parse_description(&desc)?;
         task.change_id = change_id.to_string();
@@ -135,26 +136,29 @@ impl HandoffGenerator {
             "(failed to get diff)".to_string()
         });
 
-        // Get history
-        let history = self.get_change_log(change_id).await.unwrap_or_else(|e| {
-            warn!("failed to get change log: {}", e);
-            Vec::new()
-        });
+        // Get parent changes
+        let parent_changes = self.get_change_log(change_id).await
+            .map(|entries| entries.into_iter().map(|e| e.change_id).collect())
+            .unwrap_or_else(|e| {
+                warn!("failed to get parent changes: {}", e);
+                Vec::new()
+            });
 
-        // Get metadata (placeholder - would load from .tasks/metadata.jsonl)
-        let metadata = self.load_metadata(change_id).await.ok();
+        let context = task.context.clone();
 
         Ok(AgentHandoff {
-            context: task.context.clone(),
             task,
+            context,
             diff,
-            history,
-            metadata,
+            parent_changes,
         })
     }
 
     /// Update handoff context for a task.
+    #[instrument(skip(self, handoff), fields(change_id))]
     async fn update_handoff(&self, change_id: &str, handoff: &HandoffContext) -> Result<()> {
+        debug!("Updating handoff context");
+
         // Get current description
         let desc = self
             .exec_jj(&[
@@ -168,7 +172,7 @@ impl HandoffGenerator {
                 "description",
             ])
             .await
-            .context("failed to get description")?;
+            .map_err(|e| HoxError::JjError(format!("failed to get description: {}", e)))?;
 
         // Parse and update
         let mut task = self.parse_description(&desc)?;
@@ -182,33 +186,17 @@ impl HandoffGenerator {
             "-m",
             &task.format_description(),
         ])
-        .await?;
+        .await
+        .map_err(|e| HoxError::JjError(format!("failed to update description: {}", e)))?;
 
         Ok(())
     }
 
     /// Parse task from structured description.
+    #[instrument(skip(self, desc))]
     fn parse_description(&self, desc: &str) -> Result<Task> {
-        let mut task = Task {
-            change_id: String::new(),
-            title: String::new(),
-            description: None,
-            priority: Priority::Medium,
-            status: TaskStatus::Pending,
-            agent: None,
-            labels: None,
-            due_date: None,
-            context: Some(HandoffContext {
-                current_focus: String::new(),
-                progress: Vec::new(),
-                next_steps: Vec::new(),
-                blockers: None,
-                open_questions: None,
-                files_touched: None,
-                updated_at: Utc::now(),
-            }),
-            bookmark: None,
-        };
+        let mut task = Task::new("", "");
+        task.context = Some(HandoffContext::new(""));
 
         let lines: Vec<&str> = desc.lines().collect();
         let mut current_section = "";
@@ -226,7 +214,7 @@ impl HandoffGenerator {
                 continue;
             }
             if let Some(status) = line.strip_prefix("Status: ") {
-                task.status = TaskStatus::from_str(status).unwrap_or(TaskStatus::Pending);
+                task.status = TaskStatus::from_str(status).unwrap_or(TaskStatus::Open);
                 continue;
             }
             if let Some(agent) = line.strip_prefix("Agent: ") {
@@ -273,11 +261,6 @@ impl HandoffGenerator {
                         context.blockers.get_or_insert_with(Vec::new).push(item.to_string());
                     }
                 }
-                "Open Questions" => {
-                    if let Some(item) = line.strip_prefix("- ") {
-                        context.open_questions.get_or_insert_with(Vec::new).push(item.to_string());
-                    }
-                }
                 "Files Touched" => {
                     if !line.is_empty() {
                         context.files_touched.get_or_insert_with(Vec::new).push(line.to_string());
@@ -290,32 +273,24 @@ impl HandoffGenerator {
         Ok(task)
     }
 
-    /// Load task metadata from .tasks/metadata.jsonl (placeholder).
-    async fn load_metadata(&self, _change_id: &str) -> Result<TaskMetadata> {
-        // This is a placeholder - in a full implementation, this would:
-        // 1. Read .tasks/metadata.jsonl
-        // 2. Parse JSONL entries
-        // 3. Find the entry for this change_id
-        // For now, return an error indicating metadata is not available
-        Err(anyhow::anyhow!("metadata loading not yet implemented"))
-    }
-
     /// Execute a jj command and return stdout.
+    #[instrument(skip(self, args), fields(command = %args.join(" ")))]
     async fn exec_jj(&self, args: &[&str]) -> Result<String> {
-        debug!("executing jj command: jj {}", args.join(" "));
+        debug!("Executing jj command");
 
         let output = Command::new("jj")
             .args(args)
             .current_dir(&self.repo_root)
             .output()
-            .context("failed to execute jj command")?;
+            .map_err(|e| HoxError::JjError(format!("failed to execute jj: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("jj command failed: {}", stderr);
+            return Err(HoxError::JjError(format!("jj command failed: {}", stderr)));
         }
 
-        Ok(String::from_utf8(output.stdout)?)
+        String::from_utf8(output.stdout)
+            .map_err(|e| HoxError::Parse(format!("invalid UTF-8 in jj output: {}", e)))
     }
 }
 
@@ -359,43 +334,32 @@ src/db.rs
         assert_eq!(task.priority, Priority::High);
         assert_eq!(task.status, TaskStatus::InProgress);
         assert_eq!(task.agent, Some("agent-1".to_string()));
+        assert!(task.bookmark.is_none());
 
         let context = task.context.unwrap();
         assert_eq!(context.current_focus, "Working on the authentication module");
         assert_eq!(context.progress.len(), 2);
         assert_eq!(context.next_steps.len(), 2);
         assert_eq!(context.blockers.as_ref().unwrap().len(), 1);
-        assert_eq!(context.open_questions.as_ref().unwrap().len(), 1);
         assert_eq!(context.files_touched.as_ref().unwrap().len(), 2);
     }
 
     #[test]
     fn test_format_description() {
-        let task = Task {
-            change_id: "abc123".to_string(),
-            title: "Test Task".to_string(),
-            description: None,
-            priority: Priority::Medium,
-            status: TaskStatus::Pending,
-            agent: Some("test-agent".to_string()),
-            labels: None,
-            due_date: None,
-            context: Some(HandoffContext {
-                current_focus: "Testing handoff".to_string(),
-                progress: vec!["Step 1".to_string()],
-                next_steps: vec!["Step 2".to_string()],
-                blockers: None,
-                open_questions: None,
-                files_touched: None,
-                updated_at: Utc::now(),
-            }),
-            bookmark: None,
-        };
+        let mut task = Task::new("abc123", "Test Task");
+        task.priority = Priority::Medium;
+        task.status = TaskStatus::Open;
+        task.agent = Some("test-agent".to_string());
+
+        let mut ctx = HandoffContext::new("Testing handoff");
+        ctx.add_progress("Step 1");
+        ctx.add_next_step("Step 2");
+        task.context = Some(ctx);
 
         let formatted = task.format_description();
         assert!(formatted.contains("Task: Test Task"));
         assert!(formatted.contains("Priority: 2"));
-        assert!(formatted.contains("Status: pending"));
+        assert!(formatted.contains("Status: open"));
         assert!(formatted.contains("Agent: test-agent"));
         assert!(formatted.contains("Testing handoff"));
         assert!(formatted.contains("- [x] Step 1"));

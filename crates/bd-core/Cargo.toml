@@ -5,14 +5,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core types for JJ-native task orchestration"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-sha2.workspace = true
-hex.workspace = true
+tracing.workspace = true
 gix.workspace = true
 
 [dev-dependencies]

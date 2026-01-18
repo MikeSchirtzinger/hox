@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use turso::{params, Builder, Connection};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use tracing::{debug, error, info, instrument, warn};
 
 /// Database connection wrapper for Turso
 pub struct Database {
@@ -99,17 +100,28 @@ impl Database {
     /// # Ok(())
     /// # }
     /// ```
+    #[instrument(skip(path), fields(path = %path.as_ref().display()))]
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
+        debug!("Opening database connection");
 
         // Ensure parent directory exists
         if let Some(parent) = path.as_ref().parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                error!(error = %e, "Failed to create database parent directory");
+                e
+            })?;
         }
 
         // Open database using Turso builder with file URL
-        let db = Builder::new_local(&path_str).build().await?;
-        let conn = db.connect()?;
+        let db = Builder::new_local(&path_str).build().await.map_err(|e| {
+            error!(error = %e, "Failed to build database");
+            e
+        })?;
+        let conn = db.connect().map_err(|e| {
+            error!(error = %e, "Failed to connect to database");
+            e
+        })?;
 
         // Configure pragmas for WAL mode and performance
         // Use query() for PRAGMA statements as they may return results
@@ -117,6 +129,7 @@ impl Database {
         let _ = conn.query("PRAGMA busy_timeout=5000", params![]).await?;
         let _ = conn.query("PRAGMA foreign_keys=ON", params![]).await?;
 
+        info!("Database connection opened successfully");
         Ok(Database {
             conn,
             path: path_str,
@@ -124,9 +137,12 @@ impl Database {
     }
 
     /// Close closes the database connection
+    #[instrument(skip(self), fields(path = %self.path))]
     pub async fn close(self) -> Result<()> {
+        debug!("Closing database connection");
         // Turso Connection doesn't require explicit close in Rust
         // Drop handles cleanup automatically
+        info!("Database connection closed");
         Ok(())
     }
 
@@ -140,7 +156,10 @@ impl Database {
     /// This creates the tasks, deps, and blocked_cache tables along with
     /// necessary indexes for fast queries. This is idempotent - safe to call
     /// multiple times.
+    #[instrument(skip(self))]
     pub async fn init_schema(&self) -> Result<()> {
+        debug!("Initializing database schema");
+
         let statements = vec![
             // Tasks table
             r#"CREATE TABLE IF NOT EXISTS tasks (
@@ -191,9 +210,13 @@ impl Database {
         ];
 
         for stmt in statements {
-            self.conn.execute(stmt, params![]).await?;
+            self.conn.execute(stmt, params![]).await.map_err(|e| {
+                error!(error = %e, "Failed to execute schema statement");
+                e
+            })?;
         }
 
+        info!("Database schema initialized successfully");
         Ok(())
     }
 
@@ -201,11 +224,20 @@ impl Database {
     ///
     /// If a task with the same ID exists, it is updated.
     /// Tags are stored as a JSON array string.
+    #[instrument(skip(self, task), fields(task_id = %task.id, status = %task.status, priority = task.priority))]
     pub async fn upsert_task(&self, task: &TaskFile) -> Result<()> {
-        task.validate()?;
+        debug!("Upserting task to database");
+
+        task.validate().map_err(|e| {
+            error!(error = %e, "Task validation failed");
+            e
+        })?;
 
         // Serialize tags to JSON
-        let tags_json = serde_json::to_string(&task.tags)?;
+        let tags_json = serde_json::to_string(&task.tags).map_err(|e| {
+            error!(error = %e, "Failed to serialize tags");
+            e
+        })?;
 
         let query = r#"
             INSERT INTO tasks (
@@ -244,8 +276,13 @@ impl Database {
                     task.defer_until.map(|dt| dt.to_rfc3339()),
                 ],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to upsert task");
+                e
+            })?;
 
+        info!("Task upserted successfully");
         Ok(())
     }
 
@@ -253,15 +290,26 @@ impl Database {
     ///
     /// This also cascades to remove dependencies and blocked cache entries.
     /// Returns Ok if the task doesn't exist (idempotent).
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn delete_task(&self, task_id: &str) -> Result<()> {
+        debug!("Deleting task from database");
+
         let query = "DELETE FROM tasks WHERE id = ?";
-        self.conn.execute(query, params![task_id]).await?;
+        self.conn.execute(query, params![task_id]).await.map_err(|e| {
+            error!(error = %e, "Failed to delete task");
+            e
+        })?;
+
+        info!("Task deleted successfully");
         Ok(())
     }
 
     /// GetTaskByID retrieves a single task by ID.
     /// Returns TaskNotFound error if the task is not found.
+    #[instrument(skip(self), fields(task_id = %id))]
     pub async fn get_task_by_id(&self, id: &str) -> Result<TaskFile> {
+        debug!("Querying task by ID");
+
         let query = r#"
             SELECT id, title, description, type, status, priority,
                    assigned_agent, tags, created_at, updated_at,
@@ -270,18 +318,33 @@ impl Database {
             WHERE id = ?
         "#;
 
-        let mut rows = self.conn.query(query, params![id]).await?;
+        let mut rows = self.conn.query(query, params![id]).await.map_err(|e| {
+            error!(error = %e, "Failed to query task by ID");
+            e
+        })?;
 
         if let Some(row) = rows.next().await? {
-            Ok(parse_task_row(&row)?)
+            let task = parse_task_row(&row)?;
+            info!("Task found");
+            Ok(task)
         } else {
+            warn!("Task not found");
             Err(DbError::TaskNotFound(id.to_string()))
         }
     }
 
     /// ListTasks retrieves tasks matching the given filters.
     /// Results are ordered by priority ASC, then created_at ASC.
+    #[instrument(skip(self), fields(
+        status = ?filter.status,
+        task_type = ?filter.task_type,
+        priority = ?filter.priority,
+        limit = filter.limit,
+        offset = filter.offset
+    ))]
     pub async fn list_tasks(&self, filter: ListTasksFilter) -> Result<Vec<TaskFile>> {
+        debug!("Listing tasks with filters");
+
         let mut conditions = Vec::new();
         let mut params_vec: Vec<turso::Value> = Vec::new();
 
@@ -335,13 +398,17 @@ impl Database {
             params_vec.push((filter.offset as i64).into());
         }
 
-        let mut rows = self.conn.query(&query, params_vec).await?;
+        let mut rows = self.conn.query(&query, params_vec).await.map_err(|e| {
+            error!(error = %e, "Failed to list tasks");
+            e
+        })?;
         let mut tasks = Vec::new();
 
         while let Some(row) = rows.next().await? {
             tasks.push(parse_task_row(&row)?);
         }
 
+        info!(count = tasks.len(), "Found tasks");
         Ok(tasks)
     }
 
@@ -352,7 +419,14 @@ impl Database {
     ///   - defer_until IS NULL OR defer_until <= now (unless include_deferred is true)
     ///
     /// Results are ordered by priority ASC (P0 first), then created_at ASC.
+    #[instrument(skip(self), fields(
+        include_deferred = opts.include_deferred,
+        limit = opts.limit,
+        assigned_agent = ?opts.assigned_agent
+    ))]
     pub async fn get_ready_tasks(&self, opts: ReadyTasksOptions) -> Result<Vec<TaskFile>> {
+        debug!("Querying ready tasks");
+
         let mut conditions = vec!["status = ?"];
         let mut params_vec: Vec<turso::Value> = vec!["open".into()];
 
@@ -383,19 +457,29 @@ impl Database {
             params_vec.push((opts.limit as i64).into());
         }
 
-        let mut rows = self.conn.query(&query, params_vec).await?;
+        let mut rows = self.conn.query(&query, params_vec).await.map_err(|e| {
+            error!(error = %e, "Failed to query ready tasks");
+            e
+        })?;
         let mut tasks = Vec::new();
 
         while let Some(row) = rows.next().await? {
             tasks.push(parse_task_row(&row)?);
         }
 
+        info!(count = tasks.len(), "Found ready tasks");
         Ok(tasks)
     }
 
     /// UpsertDep inserts or updates a dependency in the database.
+    #[instrument(skip(self, dep), fields(from = %dep.from, to = %dep.to, dep_type = %dep.dep_type))]
     pub async fn upsert_dep(&self, dep: &DepFile) -> Result<()> {
-        dep.validate()?;
+        debug!("Upserting dependency to database");
+
+        dep.validate().map_err(|e| {
+            error!(error = %e, "Dependency validation failed");
+            e
+        })?;
 
         let query = r#"
             INSERT INTO deps (from_id, to_id, type, created_at)
@@ -414,26 +498,43 @@ impl Database {
                     dep.created_at.to_rfc3339(),
                 ],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to upsert dependency");
+                e
+            })?;
 
+        info!("Dependency upserted successfully");
         Ok(())
     }
 
     /// DeleteDep removes a dependency from the database.
     ///
     /// Returns Ok if the dependency doesn't exist (idempotent).
+    #[instrument(skip(self), fields(from = %from, to = %to, dep_type = %dep_type))]
     pub async fn delete_dep(&self, from: &str, to: &str, dep_type: &str) -> Result<()> {
+        debug!("Deleting dependency from database");
+
         let query = "DELETE FROM deps WHERE from_id = ? AND to_id = ? AND type = ?";
         self.conn
             .execute(query, params![from, to, dep_type])
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to delete dependency");
+                e
+            })?;
+
+        info!("Dependency deleted successfully");
         Ok(())
     }
 
     /// GetDepsForTask returns all dependencies for a given task.
     /// This includes both dependencies (tasks this task depends on)
     /// and dependents (tasks that depend on this task).
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn get_deps_for_task(&self, task_id: &str) -> Result<Vec<DepFile>> {
+        debug!("Querying dependencies for task");
+
         let query = r#"
             SELECT from_id, to_id, type, created_at
             FROM deps
@@ -441,13 +542,17 @@ impl Database {
             ORDER BY created_at ASC
         "#;
 
-        let mut rows = self.conn.query(query, params![task_id, task_id]).await?;
+        let mut rows = self.conn.query(query, params![task_id, task_id]).await.map_err(|e| {
+            error!(error = %e, "Failed to query dependencies for task");
+            e
+        })?;
         let mut deps = Vec::new();
 
         while let Some(row) = rows.next().await? {
             deps.push(parse_dep_row(&row)?);
         }
 
+        info!(count = deps.len(), "Found dependencies for task");
         Ok(deps)
     }
 
@@ -456,18 +561,28 @@ impl Database {
     /// This performs a transitive closure query to find all tasks that are
     /// blocked by open tasks with "blocks" dependencies.
     /// Uses iterative approach for compatibility (no recursive CTEs).
+    #[instrument(skip(self))]
     pub async fn refresh_blocked_cache(&mut self) -> Result<()> {
+        let start = std::time::Instant::now();
+        info!("Starting blocked cache refresh");
+
         // Start transaction
-        let tx = self.conn.transaction().await?;
+        let tx = self.conn.transaction().await.map_err(|e| {
+            error!(error = %e, "Failed to start transaction");
+            e
+        })?;
 
         // Clear existing cache
+        debug!("Clearing existing blocked cache");
         tx.execute("DELETE FROM blocked_cache", params![]).await?;
 
         // Reset all is_blocked flags
+        debug!("Resetting is_blocked flags");
         tx.execute("UPDATE tasks SET is_blocked = 0", params![])
             .await?;
 
         // Get all open task IDs for filtering
+        debug!("Querying open tasks");
         let mut open_tasks = HashSet::new();
         let mut rows = tx
             .query("SELECT id FROM tasks WHERE status != 'closed'", params![])
@@ -478,8 +593,10 @@ impl Database {
             open_tasks.insert(id);
         }
         drop(rows);
+        debug!(open_task_count = open_tasks.len(), "Found open tasks");
 
         // Get all blocking dependencies
+        debug!("Querying blocking dependencies");
         let mut blocked_by: HashMap<String, Vec<String>> = HashMap::new();
         let mut rows = tx
             .query(
@@ -498,8 +615,11 @@ impl Database {
             }
         }
         drop(rows);
+        debug!(blocking_dep_count = blocked_by.len(), "Found blocking dependencies");
 
         // Compute transitive closure iteratively
+        debug!("Computing transitive closure");
+        let closure_start = std::time::Instant::now();
         let mut blocked: HashMap<String, HashSet<String>> = HashMap::new();
 
         // Initialize with direct blockers
@@ -513,8 +633,10 @@ impl Database {
 
         // Iterate until no changes (fixed point)
         let mut changed = true;
+        let mut iteration_count = 0;
         while changed {
             changed = false;
+            iteration_count += 1;
             let task_ids: Vec<String> = blocked.keys().cloned().collect();
 
             for task_id in task_ids {
@@ -538,9 +660,17 @@ impl Database {
                 }
             }
         }
+        let closure_elapsed = closure_start.elapsed();
+        debug!(
+            iterations = iteration_count,
+            elapsed_ms = closure_elapsed.as_millis(),
+            "Transitive closure computed"
+        );
 
         // Insert into blocked_cache and update is_blocked
+        debug!("Updating blocked cache and is_blocked flags");
         let now = Utc::now().to_rfc3339();
+        let mut blocked_task_count = 0;
 
         for (task_id, blockers) in blocked {
             if blockers.is_empty() {
@@ -564,37 +694,75 @@ impl Database {
                 params![task_id],
             )
             .await?;
+
+            blocked_task_count += 1;
         }
 
         // Commit transaction
-        tx.commit().await?;
+        debug!("Committing transaction");
+        tx.commit().await.map_err(|e| {
+            error!(error = %e, "Failed to commit transaction");
+            e
+        })?;
+
+        let elapsed = start.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            blocked_task_count = blocked_task_count,
+            "Blocked cache refresh complete"
+        );
+
+        if elapsed.as_secs() > 1 {
+            warn!(
+                elapsed_ms = elapsed.as_millis(),
+                "Blocked cache refresh took longer than 1 second"
+            );
+        }
 
         Ok(())
     }
 
     /// GetTaskCount returns the total number of tasks in the database.
+    #[instrument(skip(self))]
     pub async fn get_task_count(&self) -> Result<i64> {
+        debug!("Counting tasks");
+
         let mut rows = self
             .conn
             .query("SELECT COUNT(*) FROM tasks", params![])
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to count tasks");
+                e
+            })?;
 
         if let Some(row) = rows.next().await? {
-            Ok(row.get(0)?)
+            let count: i64 = row.get(0)?;
+            info!(count = count, "Task count retrieved");
+            Ok(count)
         } else {
             Ok(0)
         }
     }
 
     /// GetDepCount returns the total number of dependencies in the database.
+    #[instrument(skip(self))]
     pub async fn get_dep_count(&self) -> Result<i64> {
+        debug!("Counting dependencies");
+
         let mut rows = self
             .conn
             .query("SELECT COUNT(*) FROM deps", params![])
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to count dependencies");
+                e
+            })?;
 
         if let Some(row) = rows.next().await? {
-            Ok(row.get(0)?)
+            let count: i64 = row.get(0)?;
+            info!(count = count, "Dependency count retrieved");
+            Ok(count)
         } else {
             Ok(0)
         }
@@ -604,7 +772,10 @@ impl Database {
     /// This performs a transitive closure over "blocks" dependencies to find all
     /// blocking tasks, not just direct dependencies.
     /// Uses iterative BFS approach for compatibility.
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn get_blocking_tasks(&self, task_id: &str) -> Result<Vec<TaskFile>> {
+        debug!("Finding blocking tasks");
+
         // Build blocking graph using BFS
         let mut blocked_by: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -614,7 +785,11 @@ impl Database {
                 "SELECT from_id, to_id FROM deps WHERE type = 'blocks'",
                 params![],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to query blocking dependencies");
+                e
+            })?;
 
         while let Some(row) = rows.next().await? {
             let from_id: String = row.get(0)?;
@@ -648,8 +823,11 @@ impl Database {
         }
 
         if all_blockers.is_empty() {
+            info!("No blocking tasks found");
             return Ok(Vec::new());
         }
+
+        debug!(blocker_count = all_blockers.len(), "Found transitive blockers");
 
         // Build query for blocking tasks
         let placeholders: Vec<String> = all_blockers.iter().map(|_| "?".to_string()).collect();
@@ -666,13 +844,17 @@ impl Database {
         let params_vec: Vec<turso::Value> =
             all_blockers.into_iter().map(|id| id.into()).collect();
 
-        let mut rows = self.conn.query(&query, params_vec).await?;
+        let mut rows = self.conn.query(&query, params_vec).await.map_err(|e| {
+            error!(error = %e, "Failed to query blocking tasks");
+            e
+        })?;
         let mut tasks = Vec::new();
 
         while let Some(row) = rows.next().await? {
             tasks.push(parse_task_row(&row)?);
         }
 
+        info!(count = tasks.len(), "Retrieved blocking tasks");
         Ok(tasks)
     }
 
@@ -683,7 +865,10 @@ impl Database {
     /// # Returns
     /// * `Ok(Vec<TaskFile>)` - All tasks in the database
     /// * `Err(_)` - Database query failed
+    #[instrument(skip(self))]
     pub async fn list_all_tasks(&self) -> Result<Vec<TaskFile>> {
+        debug!("Listing all tasks");
+
         let mut rows = self
             .conn
             .query(
@@ -694,13 +879,18 @@ impl Database {
                  ORDER BY created_at DESC",
                 params![],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to list all tasks");
+                e
+            })?;
 
         let mut tasks = Vec::new();
         while let Some(row) = rows.next().await? {
             tasks.push(parse_task_row(&row)?);
         }
 
+        info!(count = tasks.len(), "Listed all tasks");
         Ok(tasks)
     }
 
@@ -712,7 +902,10 @@ impl Database {
     /// # Returns
     /// * `Ok(Vec<DepFile>)` - All dependencies in the database
     /// * `Err(_)` - Database query failed
+    #[instrument(skip(self))]
     pub async fn list_all_deps(&self) -> Result<Vec<DepFile>> {
+        debug!("Listing all dependencies");
+
         let mut rows = self
             .conn
             .query(
@@ -721,7 +914,11 @@ impl Database {
                  ORDER BY created_at DESC",
                 params![],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to list all dependencies");
+                e
+            })?;
 
         let mut deps = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -736,6 +933,7 @@ impl Database {
             });
         }
 
+        info!(count = deps.len(), "Listed all dependencies");
         Ok(deps)
     }
 }

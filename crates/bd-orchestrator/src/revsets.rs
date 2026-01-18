@@ -3,23 +3,9 @@
 //! This module provides common revset patterns for querying task state,
 //! dependencies, and assignment in a JJ repository-based task system.
 
+use bd_core::{HoxError, Result};
 use std::process::Command;
-use thiserror::Error;
-
-/// Errors that can occur during revset queries.
-#[derive(Debug, Error)]
-pub enum RevsetError {
-    #[error("JJ command failed: {0}")]
-    CommandFailed(String),
-
-    #[error("Invalid output from JJ: {0}")]
-    InvalidOutput(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-pub type Result<T> = std::result::Result<T, RevsetError>;
+use tracing::{debug, instrument};
 
 /// Trait for executing JJ commands.
 ///
@@ -58,12 +44,12 @@ impl JjExecutor for DefaultJjExecutor {
                 .output()
         })
         .await
-        .map_err(|e| RevsetError::CommandFailed(e.to_string()))?
-        .map_err(|e| RevsetError::Io(e))?;
+        .map_err(|e| HoxError::JjError(format!("tokio spawn failed: {}", e)))?
+        .map_err(|e| HoxError::Io(e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RevsetError::CommandFailed(stderr.to_string()));
+            return Err(HoxError::JjError(stderr.to_string()));
         }
 
         Ok(output.stdout)
@@ -85,7 +71,9 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// These are leaf nodes in the task DAG that aren't in conflict.
     /// Uses revset: `heads(bookmarks(glob:"task-*")) - conflicts()`
+    #[instrument(skip(self))]
     pub async fn ready_tasks(&self) -> Result<Vec<String>> {
+        debug!("Querying ready tasks");
         let revset = r#"heads(bookmarks(glob:"task-*")) - conflicts()"#;
         self.query_change_ids(revset).await
     }
@@ -367,7 +355,7 @@ mod tests {
             self.responses
                 .get(&key)
                 .cloned()
-                .ok_or_else(|| RevsetError::CommandFailed(format!("No mock for: {}", key)))
+                .ok_or_else(|| HoxError::JjError(format!("No mock for: {}", key)))
         }
     }
 

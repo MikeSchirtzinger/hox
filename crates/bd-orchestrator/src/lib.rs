@@ -31,9 +31,15 @@ pub mod revsets;
 pub mod task;
 pub mod types;
 
-// Re-export commonly used types
+// Re-export commonly used types from bd-core
+pub use bd_core::{
+    AgentHandoff, ChangeEntry, HandoffContext, HoxError, Priority, Result, Task, TaskMetadata,
+    TaskStatus,
+};
+
+// Re-export orchestrator-specific types and modules
 pub use handoff::HandoffGenerator;
-pub use jj::{JjCommand, JjError, JjExecutor};
+pub use jj::{JjCommand, JjExecutor};
 pub use revsets::RevsetQueries;
 pub use task::{MetadataStore, TaskManager};
-pub use types::{HandoffContext, Priority, Task, TaskMetadata, TaskStatus};
+pub use types::HandoffSummary;

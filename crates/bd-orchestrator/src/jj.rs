@@ -4,48 +4,14 @@
 //! both real command execution and mocked execution for testing.
 
 use async_trait::async_trait;
+use bd_core::{HoxError, Result};
 use std::path::PathBuf;
 use std::process::Stdio;
-use thiserror::Error;
 use tokio::process::Command;
+use tracing::{debug, instrument};
 
 #[cfg(test)]
 use std::collections::HashMap;
-
-/// Result type for JJ operations
-pub type Result<T> = std::result::Result<T, JjError>;
-
-/// Errors that can occur during JJ command execution
-#[derive(Debug, Error)]
-pub enum JjError {
-    /// Command execution failed
-    #[error("JJ command failed: {0}")]
-    CommandFailed(String),
-
-    /// Failed to parse JJ output
-    #[error("Failed to parse JJ output: {0}")]
-    ParseError(String),
-
-    /// Resource not found
-    #[error("Not found: {0}")]
-    NotFound(String),
-
-    /// Invalid repository path
-    #[error("Invalid repository path: {0}")]
-    InvalidRepo(String),
-
-    /// IO error occurred
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// UTF-8 conversion error
-    #[error("UTF-8 conversion error: {0}")]
-    Utf8Error(#[from] std::string::FromUtf8Error),
-
-    /// Generic error
-    #[error("{0}")]
-    Other(String),
-}
 
 /// Trait for executing jj commands
 ///
@@ -103,15 +69,18 @@ impl JjCommand {
 
 #[async_trait]
 impl JjExecutor for JjCommand {
+    #[instrument(skip(self), fields(repo = %self.repo_path.display(), args = ?args))]
     async fn exec(&self, args: &[&str]) -> Result<String> {
+        debug!("Executing jj command");
         let (stdout, _) = self.exec_with_stderr(args).await?;
         Ok(stdout)
     }
 
+    #[instrument(skip(self), fields(repo = %self.repo_path.display(), args = ?args))]
     async fn exec_with_stderr(&self, args: &[&str]) -> Result<(String, String)> {
         // Validate repository path exists
         if !self.repo_path.exists() {
-            return Err(JjError::InvalidRepo(format!(
+            return Err(HoxError::RepoNotFound(format!(
                 "Repository path does not exist: {}",
                 self.repo_path.display()
             )));
@@ -127,17 +96,20 @@ impl JjExecutor for JjCommand {
             .stderr(Stdio::piped());
 
         // Execute the command
+        debug!("Running jj command");
         let output = cmd.output().await.map_err(|e| {
-            JjError::CommandFailed(format!("Failed to execute jj command: {}", e))
+            HoxError::JjError(format!("Failed to execute jj command: {}", e))
         })?;
 
         // Convert stdout and stderr to strings
-        let stdout = String::from_utf8(output.stdout)?;
-        let stderr = String::from_utf8(output.stderr)?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|e| HoxError::Parse(format!("invalid UTF-8 in stdout: {}", e)))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|e| HoxError::Parse(format!("invalid UTF-8 in stderr: {}", e)))?;
 
         // Check if the command was successful
         if !output.status.success() {
-            return Err(JjError::CommandFailed(format!(
+            return Err(HoxError::JjError(format!(
                 "Command failed with exit code {:?}: {}",
                 output.status.code(),
                 stderr.trim()
@@ -227,7 +199,7 @@ impl JjExecutor for MockJjExecutor {
             Some(response) => Ok(response.clone()),
             None => {
                 if self.fail_on_unknown {
-                    Err(JjError::CommandFailed(format!(
+                    Err(HoxError::JjError(format!(
                         "Mock executor: no response configured for args: {:?}",
                         args
                     )))
@@ -245,7 +217,7 @@ impl JjExecutor for MockJjExecutor {
             Some(response) => response.clone(),
             None => {
                 if self.fail_on_unknown {
-                    return Err(JjError::CommandFailed(format!(
+                    return Err(HoxError::JjError(format!(
                         "Mock executor: no response configured for args: {:?}",
                         args
                     )));

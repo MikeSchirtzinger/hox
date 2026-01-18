@@ -1,0 +1,22 @@
+[package]
+name = "hox-jj"
+description = "JJ integration layer for Hox orchestration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hox-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

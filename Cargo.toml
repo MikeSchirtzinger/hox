@@ -1,5 +1,15 @@
 [workspace]
 members = [
+    # New Hox crates (primary)
+    "crates/hox-core",
+    "crates/hox-jj",
+    "crates/hox-orchestrator",
+    "crates/hox-validation",
+    "crates/hox-metrics",
+    "crates/hox-evolution",
+    "crates/hox-cli",
+
+    # Legacy bd-* crates (for reference during transition)
     "crates/bd-core",
     "crates/bd-storage",
     "crates/bd-vcs",
@@ -15,7 +25,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Mike Schirtzinger <155995654+Mschirtzinger@users.noreply.github.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Mschirtzinger/jj-beads"
+repository = "https://github.com/Mschirtzinger/hox"
 
 [workspace.dependencies]
 # Serialization
@@ -37,30 +47,41 @@ async-trait = "0.1"
 sha2 = "0.10"
 hex = "0.4"
 
-# Logging
+# Logging/Telemetry
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
 
-# Database
+# Database (optional, feature-flagged)
 turso = { version = "0.4", features = ["sync"] }
 
-# VCS
+# VCS (for reference, Hox uses jj-lib directly)
 gix = "0.63"
 glob = "0.3"
 
 # Regex
 regex = "1.10"
 
-# File watching
+# File watching (for oplog)
 notify = "6.1"
 
 # Testing
 tempfile = "3.8"
 
-# Internal crates
+# UUID generation
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Internal crates - Hox
+hox-core = { path = "crates/hox-core" }
+hox-jj = { path = "crates/hox-jj" }
+hox-orchestrator = { path = "crates/hox-orchestrator" }
+hox-validation = { path = "crates/hox-validation" }
+hox-metrics = { path = "crates/hox-metrics" }
+hox-evolution = { path = "crates/hox-evolution" }
+
+# Legacy internal crates - BD (for reference)
 bd-core = { path = "crates/bd-core" }
 bd-storage = { path = "crates/bd-storage" }
 bd-vcs = { path = "crates/bd-vcs" }
