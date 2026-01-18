@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    # New Hox crates (primary)
     "crates/hox-core",
     "crates/hox-jj",
     "crates/hox-orchestrator",
@@ -8,14 +7,6 @@ members = [
     "crates/hox-metrics",
     "crates/hox-evolution",
     "crates/hox-cli",
-
-    # Legacy bd-* crates (for reference during transition)
-    "crates/bd-core",
-    "crates/bd-storage",
-    "crates/bd-vcs",
-    "crates/bd-daemon",
-    "crates/bd-cli",
-    "crates/bd-orchestrator",
 ]
 
 resolver = "2"
@@ -73,17 +64,10 @@ tempfile = "3.8"
 # UUID generation
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
-# Internal crates - Hox
+# Internal crates
 hox-core = { path = "crates/hox-core" }
 hox-jj = { path = "crates/hox-jj" }
 hox-orchestrator = { path = "crates/hox-orchestrator" }
 hox-validation = { path = "crates/hox-validation" }
 hox-metrics = { path = "crates/hox-metrics" }
 hox-evolution = { path = "crates/hox-evolution" }
-
-# Legacy internal crates - BD (for reference)
-bd-core = { path = "crates/bd-core" }
-bd-storage = { path = "crates/bd-storage" }
-bd-vcs = { path = "crates/bd-vcs" }
-bd-daemon = { path = "crates/bd-daemon" }
-bd-orchestrator = { path = "crates/bd-orchestrator" }

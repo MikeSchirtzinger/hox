@@ -18,9 +18,9 @@ The VCS itself is the source of truth. SQLite (Turso) serves as a query cache, n
 cargo build                    # Build all crates
 cargo build --release          # Release build
 cargo test                     # Run all tests
-cargo test -p bd-orchestrator  # Test specific crate
-cargo run --bin beads -- --help # Run CLI
-cargo install --path crates/bd-cli  # Install CLI globally
+cargo test -p hox-orchestrator # Test specific crate
+cargo run --bin hox -- --help  # Run CLI
+cargo install --path crates/hox-cli  # Install CLI globally
 ```
 
 Run tests with logging:
@@ -32,23 +32,25 @@ RUST_LOG=debug cargo test -- --nocapture
 
 | Crate | Purpose |
 |-------|---------|
-| `bd-core` | Core types: `Task`, `TaskStatus`, `Priority`, `HoxError` |
-| `bd-storage` | Turso (SQLite) database + file I/O for tasks/deps |
-| `bd-vcs` | VCS abstraction (Git via gix, Jujutsu planned) |
-| `bd-daemon` | File watcher daemon with jj oplog support |
-| `bd-orchestrator` | JJ-native task management, revsets, agent handoffs |
-| `bd-cli` | `beads` binary - CLI interface |
+| `hox-core` | Core types: `Task`, `TaskStatus`, `Priority`, `HoxError`, `AgentId` |
+| `hox-jj` | JJ integration: metadata parsing, revsets, workspace management |
+| `hox-orchestrator` | Orchestration: agent spawning, communication, handoffs |
+| `hox-validation` | Plan validation and constraint checking |
+| `hox-metrics` | Metrics collection and reporting |
+| `hox-evolution` | Plan evolution and refinement |
+| `hox-cli` | `hox` binary - CLI interface |
 
 ## Key Types
 
 ```rust
-// bd-core/src/types.rs
+// hox-core/src/types.rs
 pub enum TaskStatus { Open, InProgress, Blocked, Review, Done, Abandoned }
 pub enum Priority { Critical=0, High=1, Medium=2, Low=3 }
 pub struct Task { /* change-based task */ }
+pub struct AgentId { orchestrator, id, name }
 pub struct HandoffContext { /* agent state for handoffs */ }
 
-// bd-core/src/error.rs
+// hox-core/src/error.rs
 pub type Result<T> = std::result::Result<T, HoxError>;
 ```
 
@@ -57,24 +59,14 @@ All errors use the unified `HoxError` enum. Never panic in production code.
 ## Architecture Layers
 
 ```
-CLI (bd-cli)
+CLI (hox-cli)
     ↓
-Orchestration (bd-orchestrator) - revsets, handoffs, task management
+Orchestration (hox-orchestrator) - agent spawning, communication, handoffs
     ↓
-Storage (bd-storage) - Turso DB + file sync
+JJ Integration (hox-jj) - metadata, revsets, workspaces
     ↓
-VCS (bd-vcs) - Git/Jujutsu abstraction
-    ↓
-Core (bd-core) - Types and schemas
+Core (hox-core) - Types and schemas
 ```
-
-The daemon (`bd-daemon`) runs horizontally, watching files and syncing to the database.
-
-## Database
-
-Uses Turso (the Rust SQLite rewrite, NOT libSQL cloud). Location: `.beads/turso.db`
-
-WAL mode enabled for concurrent reads during writes.
 
 ## Revset Patterns
 
@@ -91,6 +83,11 @@ ancestors(task-xyz) & mutable()
 Finding what a task blocks:
 ```
 descendants(task-xyz)
+```
+
+Finding agent's tasks:
+```
+bookmarks(glob:"agent-{id}/*")
 ```
 
 ## Structured Description Format
@@ -119,17 +116,14 @@ internal/vcs/vcs.go
 - Integration tests: `crates/*/tests/`
 - Examples: `crates/*/examples/`
 
-Key integration test files:
-- `bd-storage/tests/db_test.rs` - Database CRUD
-- `bd-daemon/tests/oplog_integration.rs` - Daemon operations
+## Agent System
 
-## VCS Abstraction
+Agents are identified hierarchically via `AgentId`:
+- Format: `{orchestrator}/{agent-name}` (e.g., `O-A-1/agent-abc123`)
+- Each agent gets an isolated JJ workspace at `.hox-workspaces/{agent-name}/`
+- Task assignments use bookmarks: `agent-{id}/task-{name}`
 
-The `Vcs` type auto-detects Git or Jujutsu. Uses pure Rust `gix` for Git (no external binary dependency).
-
-```rust
-let vcs = Vcs::open(path)?;  // Auto-detects backend
-let commit = vcs.current_commit().await?;
-```
-
-Prefers Git when both `.git` and `.jj` exist (jj+git cohabitation).
+Communication protocol:
+- `Mutation` - Orchestrator decisions agents MUST follow
+- `Info` - Informational broadcasts agents MAY read
+- `AlignRequest` - Agent asks for guidance
