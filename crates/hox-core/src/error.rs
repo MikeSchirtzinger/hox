@@ -64,9 +64,26 @@ pub enum HoxError {
     #[error("Pattern error: {0}")]
     Pattern(String),
 
+    // API errors
+    #[error("Authentication error: {0}")]
+    Auth(String),
+
+    #[error("API error: {0}")]
+    Api(String),
+
+    #[error("API rate limit: {0}")]
+    ApiLimit(String),
+
+    // Path validation errors
+    #[error("Path validation failed: {0}")]
+    PathValidation(String),
+
     // I/O errors
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
+
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),

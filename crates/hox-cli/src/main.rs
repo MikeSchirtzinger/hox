@@ -9,8 +9,9 @@
 //!   hox validate <change>       Run validation on a change
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use hox_core::OrchestratorId;
+use clap::{Parser, Subcommand, ValueEnum};
+use hox_agent::{LoopConfig, Model};
+use hox_core::{OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
 use hox_jj::{JjCommand, JjExecutor, MetadataManager, RevsetQueries};
 use hox_orchestrator::{Orchestrator, OrchestratorConfig, PhaseManager};
@@ -97,6 +98,64 @@ enum Commands {
         #[arg(long)]
         orchestrator: Option<String>,
     },
+
+    /// Run Ralph-style autonomous loop on a task
+    Loop {
+        #[command(subcommand)]
+        action: LoopCommands,
+    },
+}
+
+/// Loop subcommands for Ralph-style autonomous iteration
+#[derive(Subcommand)]
+enum LoopCommands {
+    /// Start a loop on a task
+    Start {
+        /// JJ change ID of the task to work on
+        change_id: String,
+
+        /// Maximum number of iterations
+        #[arg(short = 'n', long, default_value = "20")]
+        max_iterations: usize,
+
+        /// Model to use (opus, sonnet, haiku)
+        #[arg(short, long, default_value = "sonnet")]
+        model: CliModel,
+
+        /// Disable backpressure checks (tests/lints/builds)
+        #[arg(long)]
+        no_backpressure: bool,
+    },
+
+    /// Show loop status for a task
+    Status {
+        /// JJ change ID
+        change_id: String,
+    },
+
+    /// Stop a running loop (marks task as blocked)
+    Stop {
+        /// JJ change ID
+        change_id: String,
+    },
+}
+
+/// CLI-friendly model enum
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliModel {
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl From<CliModel> for Model {
+    fn from(m: CliModel) -> Self {
+        match m {
+            CliModel::Opus => Model::Opus,
+            CliModel::Sonnet => Model::Sonnet,
+            CliModel::Haiku => Model::Haiku,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -153,6 +212,7 @@ async fn main() -> Result<()> {
             agent,
             orchestrator,
         } => cmd_set(priority, status, agent, orchestrator).await,
+        Commands::Loop { action } => cmd_loop(action).await,
     }
 }
 
@@ -405,6 +465,122 @@ async fn cmd_set(
     manager.set(&change_id, &metadata).await?;
 
     println!("Updated metadata on {}", change_id);
+
+    Ok(())
+}
+
+async fn cmd_loop(action: LoopCommands) -> Result<()> {
+    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+
+    match action {
+        LoopCommands::Start {
+            change_id,
+            max_iterations,
+            model,
+            no_backpressure,
+        } => {
+            info!(
+                "Starting loop on {} with model {:?}, max {} iterations",
+                change_id, model, max_iterations
+            );
+
+            // Get task description from change
+            let output = jj
+                .exec(&["log", "-r", &change_id, "-T", "description", "--no-graph"])
+                .await?;
+
+            if !output.success {
+                anyhow::bail!("Failed to get change description: {}", output.stderr);
+            }
+
+            let task = Task::new(&change_id, output.stdout.trim());
+
+            // Create loop config
+            let config = LoopConfig {
+                max_iterations,
+                model: model.into(),
+                backpressure_enabled: !no_backpressure,
+                max_tokens: 16000,
+            };
+
+            // Create and run orchestrator
+            let orch_config = OrchestratorConfig::new(OrchestratorId::root(), jj.repo_root());
+            let mut orchestrator = Orchestrator::with_executor(orch_config, jj).await?;
+
+            println!("Starting Ralph-style loop...");
+            println!("  Task: {}", task.description.lines().next().unwrap_or(""));
+            println!("  Model: {:?}", model);
+            println!("  Max iterations: {}", max_iterations);
+            println!("  Backpressure: {}", if no_backpressure { "disabled" } else { "enabled" });
+            println!();
+
+            let result = orchestrator.run_loop(task, Some(config)).await?;
+
+            println!();
+            println!("Loop completed!");
+            println!("  Iterations: {}", result.iterations);
+            println!("  Success: {}", result.success);
+            println!("  Stop reason: {:?}", result.stop_reason);
+            println!("  Files created: {}", result.files_created.len());
+            println!("  Files modified: {}", result.files_modified.len());
+            println!(
+                "  Tokens used: {} input, {} output",
+                result.total_usage.input_tokens, result.total_usage.output_tokens
+            );
+
+            if !result.success {
+                println!();
+                println!("Final backpressure status:");
+                println!("  Tests: {}", if result.final_status.tests_passed { "PASSED" } else { "FAILED" });
+                println!("  Lints: {}", if result.final_status.lints_passed { "PASSED" } else { "FAILED" });
+                println!("  Builds: {}", if result.final_status.builds_passed { "PASSED" } else { "FAILED" });
+            }
+        }
+
+        LoopCommands::Status { change_id } => {
+            let manager = MetadataManager::new(jj.clone());
+            let metadata = manager.read(&change_id).await?;
+
+            println!("Loop status for {}:", change_id);
+
+            if let Some(iteration) = metadata.loop_iteration {
+                println!("  Current iteration: {}", iteration);
+            } else {
+                println!("  No loop in progress");
+            }
+
+            if let Some(max) = metadata.loop_max_iterations {
+                println!("  Max iterations: {}", max);
+            }
+
+            if let Some(status) = metadata.status {
+                println!("  Status: {}", status);
+            }
+
+            // Show task description
+            let output = jj
+                .exec(&["log", "-r", &change_id, "-T", "description", "--no-graph"])
+                .await?;
+
+            if output.success && !output.stdout.is_empty() {
+                println!();
+                println!("Description:");
+                for line in output.stdout.lines().take(20) {
+                    println!("  {}", line);
+                }
+            }
+        }
+
+        LoopCommands::Stop { change_id } => {
+            let manager = MetadataManager::new(jj.clone());
+            let mut metadata = manager.read(&change_id).await?;
+
+            metadata.status = Some(hox_core::TaskStatus::Blocked);
+            manager.set(&change_id, &metadata).await?;
+
+            println!("Marked {} as blocked (loop stopped)", change_id);
+        }
+    }
 
     Ok(())
 }

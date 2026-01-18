@@ -1,6 +1,6 @@
 [package]
-name = "hox-orchestrator"
-description = "Multi-agent orchestration engine for Hox"
+name = "hox-agent"
+description = "Anthropic API client and file executor for Hox orchestration"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,17 +8,28 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Core
 hox-core = { workspace = true }
-hox-jj = { workspace = true }
-hox-agent = { workspace = true }
-hox-metrics = { workspace = true }
+
+# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Date/Time
+chrono = { workspace = true }
+
+# Error handling
 thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Async
 tokio = { workspace = true }
-async-trait = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Logging
 tracing = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

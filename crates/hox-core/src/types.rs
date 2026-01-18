@@ -234,6 +234,10 @@ pub struct HoxMetadata {
     pub orchestrator: Option<String>,
     pub msg_to: Option<String>,
     pub msg_type: Option<MessageType>,
+    /// Current loop iteration (for Ralph-style loops)
+    pub loop_iteration: Option<usize>,
+    /// Maximum iterations for the loop
+    pub loop_max_iterations: Option<usize>,
 }
 
 impl HoxMetadata {
@@ -312,6 +316,22 @@ impl Task {
     }
 }
 
+/// Backpressure status for loop tracking
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackpressureStatus {
+    pub tests_passed: bool,
+    pub lints_passed: bool,
+    pub builds_passed: bool,
+    pub last_errors: Vec<String>,
+}
+
+impl BackpressureStatus {
+    /// Check if all validations passed
+    pub fn all_passed(&self) -> bool {
+        self.tests_passed && self.lints_passed && self.builds_passed
+    }
+}
+
 /// Handoff context for agent state preservation
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandoffContext {
@@ -327,6 +347,10 @@ pub struct HandoffContext {
     pub files_touched: Vec<String>,
     /// Key decisions made
     pub decisions: Vec<String>,
+    /// Current loop iteration (for Ralph-style loops)
+    pub loop_iteration: Option<usize>,
+    /// Backpressure status from last iteration
+    pub backpressure_status: Option<BackpressureStatus>,
 }
 
 /// Agent telemetry data

@@ -1,59 +1,62 @@
-# jj-beads-rs
+# Hox
 
-A Rust rewrite of the beads file-based issue tracking system.
+**Hox** — named after [Hox genes](https://en.wikipedia.org/wiki/Hox_gene), the master regulators that orchestrated the Cambrian explosion's burst of body plan diversity. Just as Hox genes coordinate development by telling cells where they are and what to become, this system orchestrates AI agents by telling them what to do and when.
 
-## Overview
+A JJ-native multi-agent orchestration system where **tasks ARE jj changes**.
 
-Beads is a file-based issue tracking system that uses `.task.json` and `.deps.json` files to track issues and their dependencies directly in your repository.
+## Core Paradigm
+
+- **Tasks = jj changes** (change IDs are primary identifiers)
+- **Dependencies = DAG ancestry** (parent-child relationships)
+- **Assignments = bookmarks** (e.g., `agent-42/task-xyz`)
+- **Metadata = structured descriptions**
+
+The VCS itself is the source of truth.
 
 ## Project Structure
 
-This is a Cargo workspace with the following crates:
-
-- **bd-core**: Core types and traits (Issue, Dependency, Comment)
-- **bd-storage**: Database persistence layer using libsql (SQLite)
-- **bd-vcs**: Version control system abstraction (Git/Jujutsu)
-- **bd-daemon**: File watcher daemon for automatic syncing
-- **bd-cli**: Command-line interface binary
+```
+crates/
+├── hox-core          # Core types: Task, AgentId, HandoffContext
+├── hox-jj            # JJ integration: metadata, revsets, workspaces
+├── hox-agent         # Anthropic API client, file executor
+├── hox-orchestrator  # Agent spawning, loop engine, backpressure
+├── hox-validation    # Plan validation and constraints
+├── hox-metrics       # Metrics collection
+├── hox-evolution     # Plan evolution and refinement
+└── hox-cli           # CLI binary
+```
 
 ## Building
 
 ```bash
 cargo build
-```
-
-## Running
-
-```bash
-# Build and install the CLI
-cargo install --path crates/bd-cli
-
-# Or run directly
-cargo run --bin beads -- --help
-```
-
-## Development
-
-```bash
-# Check all crates
-cargo check
-
-# Run tests
 cargo test
+cargo install --path crates/hox-cli
+```
 
-# Run specific crate
-cargo check -p bd-core
+## Usage
+
+```bash
+# Run Ralph-style autonomous loop on a task
+hox loop start <change-id> --max-iterations 20 --model sonnet
+
+# Check loop status
+hox loop status <change-id>
+
+# Stop a running loop
+hox loop stop <change-id>
 ```
 
 ## Architecture
 
-The system follows a layered architecture:
+The Ralph-style loop pattern spawns **fresh agents per iteration** with no conversation history. State flows through:
 
-1. **Core Layer** (bd-core): Domain types and schemas
-2. **Storage Layer** (bd-storage): Database operations
-3. **VCS Layer** (bd-vcs): Version control integration
-4. **Daemon Layer** (bd-daemon): File watching and syncing
-5. **CLI Layer** (bd-cli): User interface
+1. JJ change descriptions (HandoffContext, metadata)
+2. Backpressure signals (test/lint/build failures)
+3. Previous iteration logs
+
+This prevents context drift that plagues long-running agents.
 
 ## License
 

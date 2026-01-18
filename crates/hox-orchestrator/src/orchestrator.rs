@@ -1,10 +1,14 @@
 //! Core orchestrator implementation
 
+use hox_agent::LoopConfig;
 use hox_core::{
-    AgentId, ChangeId, HoxError, HoxMetadata, MessageType, OrchestratorId, Phase, Result,
+    AgentId, ChangeId, HoxError, HoxMetadata, MessageType, OrchestratorId, Phase, Result, Task,
     TaskStatus,
 };
 use hox_jj::{JjCommand, JjExecutor, MetadataManager, OpLogEvent, OpLogWatcher, RevsetQueries};
+
+use crate::loop_engine::LoopEngine;
+use crate::workspace::WorkspaceManager as WM;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -376,6 +380,35 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Get active agents
     pub fn agents(&self) -> &HashMap<String, AgentId> {
         &self.agents
+    }
+
+    /// Run a Ralph-style loop on a task
+    ///
+    /// This method spawns fresh agents in a loop until all backpressure checks pass
+    /// or max iterations is reached. Each iteration is completely stateless - context
+    /// comes from JJ metadata and backpressure signals.
+    pub async fn run_loop(
+        &mut self,
+        task: Task,
+        loop_config: Option<LoopConfig>,
+    ) -> Result<hox_agent::LoopResult> {
+        let config = loop_config.unwrap_or_default();
+        info!(
+            "Starting Ralph-style loop for task {} with model {:?}, max {} iterations",
+            task.change_id, config.model, config.max_iterations
+        );
+
+        // Create workspace manager clone for the loop engine
+        let workspace_manager = WM::new(self.executor.clone());
+
+        let mut loop_engine = LoopEngine::new(
+            self.executor.clone(),
+            workspace_manager,
+            config,
+            self.config.repo_root.clone(),
+        );
+
+        loop_engine.run(&task).await
     }
 }
 
