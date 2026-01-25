@@ -904,7 +904,7 @@ hox/
 │       └── src/
 │           └── main.rs
 │
-└── jj-fork/                      # Submodule or separate repo
+└── jj-dev/                       # Submodule or separate repo
     └── (modified jj with Hox metadata support)
 ```
 
@@ -933,7 +933,7 @@ hox/
 ### JJ Fork
 
 The modified JJ is either:
-- Git submodule at `jj-fork/`
+- Git submodule at `jj-dev/`
 - Separate repo with path dependency
 
 ---
