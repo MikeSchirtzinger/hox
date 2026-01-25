@@ -100,42 +100,209 @@ pub enum MsgType {
 
 ### 2.2 Protobuf Schema Extension
 
-In `simple_store.proto`, add fields 11-16:
+**File**: `lib/src/protos/simple_store.proto`
+
+Extend the existing `Commit` message with fields 11-18:
 
 ```protobuf
 message Commit {
   // ... existing fields (1-10) ...
+  repeated bytes parents = 1;
+  repeated bytes predecessors = 2;
+  repeated bytes root_tree = 3;
+  bytes change_id = 4;
+  string description = 5;
+  Signature author = 6;
+  Signature committer = 7;
+  optional bytes secure_sig = 9;
+  repeated string conflict_labels = 10;
 
-  // Hox metadata
-  optional int32 hox_priority = 11;
-  optional string hox_status = 12;
-  optional string hox_agent = 13;
-  optional string hox_orchestrator = 14;
-  optional string hox_msg_to = 15;
-  optional string hox_msg_type = 16;
+  // Hox metadata (fields 11-18)
+  optional int32 hox_priority = 11;           // 0=Critical, 1=High, 2=Medium, 3=Low
+  optional string hox_status = 12;            // "open", "in_progress", "blocked", "review", "done", "abandoned"
+  optional string hox_agent = 13;             // Agent identifier (e.g., "agent-42")
+  optional string hox_orchestrator = 14;      // Orchestrator identifier (e.g., "O-A-1")
+  optional string hox_msg_to = 15;            // Message target (supports glob patterns)
+  optional string hox_msg_type = 16;          // "mutation", "info", "align_request"
+  optional uint32 hox_loop_iteration = 17;    // Current loop iteration (for Ralph-style loops)
+  optional uint32 hox_loop_max_iterations = 18; // Maximum loop iterations allowed
 }
 ```
 
-### 2.3 New Revset Predicates
+### 2.3 JJ Source File Locations
 
-Add revset functions for querying Hox metadata:
+**Critical files to modify in the jj fork:**
 
+| File Path | Purpose | What to Add |
+|-----------|---------|-------------|
+| `lib/src/backend.rs` | Core `Commit` struct definition | Add Hox metadata fields to `pub struct Commit` (line ~156) |
+| `lib/src/protos/simple_store.proto` | Protobuf schema for commit storage | Add fields 11-18 as shown above |
+| `lib/src/simple_backend.rs` | Proto ↔ Rust conversion | Update `commit_to_proto()` and `commit_from_proto()` functions |
+| `lib/src/revset.rs` | Revset function definitions | Add predicates to `BUILTIN_FUNCTION_MAP` (starts at line ~460) |
+| `lib/src/commit_builder.rs` | Commit builder API | Add setter methods for Hox metadata |
+| `cli/src/commands/describe.rs` | CLI describe command | Add `--set-priority`, `--set-status`, etc. flags |
+| `cli/src/commit_templater.rs` | Template rendering for commits | Register `hox_priority`, `hox_status`, etc. as template keywords |
+
+### 2.4 Rust Struct Extension
+
+**File**: `lib/src/backend.rs`
+
+Extend the existing `Commit` struct (around line 156):
+
+```rust
+#[derive(ContentHash, Debug, PartialEq, Eq, Clone, serde::Serialize)]
+pub struct Commit {
+    pub parents: Vec<CommitId>,
+    #[serde(skip)] // deprecated
+    pub predecessors: Vec<CommitId>,
+    #[serde(skip)]
+    pub root_tree: Merge<TreeId>,
+    #[serde(skip)]
+    pub conflict_labels: Merge<String>,
+    pub change_id: ChangeId,
+    pub description: String,
+    pub author: Signature,
+    pub committer: Signature,
+    #[serde(skip)]
+    pub secure_sig: Option<SecureSig>,
+
+    // Hox metadata (all optional for backwards compatibility)
+    pub hox_priority: Option<Priority>,
+    pub hox_status: Option<TaskStatus>,
+    pub hox_agent: Option<String>,
+    pub hox_orchestrator: Option<String>,
+    pub hox_msg_to: Option<String>,
+    pub hox_msg_type: Option<MsgType>,
+    pub hox_loop_iteration: Option<u32>,
+    pub hox_loop_max_iterations: Option<u32>,
+}
 ```
-priority(high)                    # Filter by priority
-status(in_progress)               # Filter by status
-agent("agent-42")                 # Filter by agent
-orchestrator("O-A-1")             # Filter by orchestrator
-msg_to("O-A-*")                   # Filter messages to orchestrator level A
-msg_type(mutation)                # Filter by message type
+
+### 2.5 New Revset Predicates
+
+**File**: `lib/src/revset.rs`
+
+Add to `BUILTIN_FUNCTION_MAP` (around line 460):
+
+```rust
+// Priority filter: priority(high), priority(critical)
+map.insert("priority", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let priority_str = expect_literal("string", arg)?;
+    let priority = Priority::from_str(&priority_str)
+        .map_err(|_| RevsetParseError::new("Invalid priority value"))?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxPriority(priority)))
+});
+
+// Status filter: status(in_progress), status(blocked)
+map.insert("status", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let status_str = expect_literal("string", arg)?;
+    let status = TaskStatus::from_str(&status_str)
+        .map_err(|_| RevsetParseError::new("Invalid status value"))?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxStatus(status)))
+});
+
+// Agent filter: agent("agent-42")
+map.insert("agent", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let pattern = expect_literal("string", arg)?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxAgent(
+        StringPattern::from_glob(&pattern)
+    )))
+});
+
+// Orchestrator filter: orchestrator("O-A-1")
+map.insert("orchestrator", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let pattern = expect_literal("string", arg)?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxOrchestrator(
+        StringPattern::from_glob(&pattern)
+    )))
+});
+
+// Message target filter with glob support: msg_to("O-A-*")
+map.insert("msg_to", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let pattern = expect_literal("string", arg)?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgTo(
+        StringPattern::from_glob(&pattern)
+    )))
+});
+
+// Message type filter: msg_type(mutation)
+map.insert("msg_type", |diagnostics, function, context| {
+    let [arg] = function.expect_exact_arguments()?;
+    let msg_type_str = expect_literal("string", arg)?;
+    let msg_type = MsgType::from_str(&msg_type_str)
+        .map_err(|_| RevsetParseError::new("Invalid message type"))?;
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgType(msg_type)))
+});
 ```
 
-**Implementation**: Register in `BUILTIN_FUNCTION_MAP` and add `RevsetFilterPredicate` variants.
+### 2.6 CLI Commands
 
-### 2.4 CLI Commands
+**File**: `cli/src/commands/describe.rs`
+
+Add Hox-specific flags to `DescribeArgs`:
+
+```rust
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct DescribeArgs {
+    // ... existing fields ...
+
+    /// Set task priority (critical, high, medium, low)
+    #[arg(long = "set-priority", value_name = "PRIORITY")]
+    set_priority: Option<String>,
+
+    /// Set task status (open, in_progress, blocked, review, done, abandoned)
+    #[arg(long = "set-status", value_name = "STATUS")]
+    set_status: Option<String>,
+
+    /// Set agent assignment
+    #[arg(long = "set-agent", value_name = "AGENT")]
+    set_agent: Option<String>,
+
+    /// Set orchestrator
+    #[arg(long = "set-orchestrator", value_name = "ORCHESTRATOR")]
+    set_orchestrator: Option<String>,
+
+    /// Set message target (supports glob patterns)
+    #[arg(long = "set-msg-to", value_name = "TARGET")]
+    set_msg_to: Option<String>,
+
+    /// Set message type (mutation, info, align_request)
+    #[arg(long = "set-msg-type", value_name = "TYPE")]
+    set_msg_type: Option<String>,
+
+    /// Mark as mutation commit (shorthand for --set-msg-type mutation)
+    #[arg(long = "mutation")]
+    mutation: bool,
+
+    /// Set loop iteration
+    #[arg(long = "set-loop-iteration", value_name = "N")]
+    set_loop_iteration: Option<u32>,
+
+    /// Set max loop iterations
+    #[arg(long = "set-loop-max", value_name = "N")]
+    set_loop_max: Option<u32>,
+}
+```
+
+**Usage examples:**
 
 ```bash
 # Set metadata
 jj describe --set-priority high --set-status in_progress
+
+# Assign to agent under orchestrator
+jj describe --set-orchestrator "O-A-1" --set-agent "agent-42"
+
+# Create mutation decision
+jj describe --mutation -m "MUTATION: user_id is the standard field name"
+
+# Set loop metadata for Ralph-style workflows
+jj describe --set-loop-iteration 3 --set-loop-max 10
 
 # Query with metadata
 jj log -r 'priority(high) & status(open)'
@@ -143,8 +310,142 @@ jj log -r 'priority(high) & status(open)'
 # Find ready tasks
 jj log -r 'heads(status(open)) - conflicts()'
 
-# Find messages for this orchestrator
+# Find messages for this orchestrator (exact or wildcard)
 jj log -r 'msg_to("O-A-1") | msg_to("O-A-*")'
+```
+
+### 2.7 Template Support
+
+**File**: `cli/src/commit_templater.rs`
+
+Add template keywords for Hox metadata:
+
+```rust
+// In CommitTemplateBuildFnTable::builtin()
+build_commit_method(method_table, "hox_priority", |commit| {
+    commit.hox_priority.map(|p| p.to_string()).unwrap_or_default()
+});
+build_commit_method(method_table, "hox_status", |commit| {
+    commit.hox_status.map(|s| s.to_string()).unwrap_or_default()
+});
+build_commit_method(method_table, "hox_agent", |commit| {
+    commit.hox_agent.clone().unwrap_or_default()
+});
+build_commit_method(method_table, "hox_orchestrator", |commit| {
+    commit.hox_orchestrator.clone().unwrap_or_default()
+});
+build_commit_method(method_table, "hox_msg_to", |commit| {
+    commit.hox_msg_to.clone().unwrap_or_default()
+});
+build_commit_method(method_table, "hox_msg_type", |commit| {
+    commit.hox_msg_type.map(|m| m.to_string()).unwrap_or_default()
+});
+build_commit_method(method_table, "hox_loop_iteration", |commit| {
+    commit.hox_loop_iteration.map(|i| i.to_string()).unwrap_or_default()
+});
+build_commit_method(method_table, "hox_loop_max_iterations", |commit| {
+    commit.hox_loop_max_iterations.map(|i| i.to_string()).unwrap_or_default()
+});
+```
+
+**Usage examples:**
+
+```bash
+# Show Hox metadata in log
+jj log -T 'change_id ++ " [" ++ hox_status ++ "/" ++ hox_priority ++ "] " ++ description.first_line()'
+
+# Custom log for orchestrator view
+jj log -T 'if(hox_agent, hox_agent ++ ": ", "") ++ description.first_line()'
+```
+
+### 2.8 Backwards Compatibility
+
+**Critical requirement**: Hox-enhanced jj (jj-dev) must remain compatible with vanilla jj.
+
+| Scenario | Behavior |
+|----------|----------|
+| Vanilla jj reads Hox commit | Hox metadata fields ignored (protobuf `optional` semantics) |
+| jj-dev reads vanilla commit | All `hox_*` fields are `None` |
+| Mixed environment | Works correctly; Hox metadata preserved when written by jj-dev |
+
+**Implementation notes:**
+
+1. All Hox fields in protobuf are `optional` - unknown fields are preserved by protobuf
+2. All Hox fields in Rust struct are `Option<T>` with `Default` implementations
+3. The `make_root_commit()` function sets all Hox fields to `None`
+4. Proto field numbers 11-18 chosen to avoid conflicts with future jj additions (leaves gap after 10)
+
+### 2.9 Wildcard Matching Semantics
+
+The `msg_to()` revset predicate supports **glob patterns** (not regex):
+
+| Pattern | Matches |
+|---------|---------|
+| `O-A-1` | Exact match only |
+| `O-A-*` | All Level A orchestrators (O-A-1, O-A-2, O-A-99) |
+| `O-*` | All orchestrators at any level |
+| `agent-*` | All agents |
+| `O-A-1/*` | All agents under O-A-1 |
+
+**Implementation**: Uses jj's existing `StringPattern::from_glob()` which converts glob to regex internally.
+
+### 2.10 Testing Strategy
+
+**Unit tests** (in respective source files):
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hox_priority_roundtrip() {
+        let commit = create_test_commit();
+        let proto = commit_to_proto(&commit);
+        let restored = commit_from_proto(proto);
+        assert_eq!(commit.hox_priority, restored.hox_priority);
+    }
+
+    #[test]
+    fn test_backwards_compat_no_hox_fields() {
+        // Proto without Hox fields should deserialize with None
+        let proto = crate::protos::simple_store::Commit::default();
+        let commit = commit_from_proto(proto);
+        assert!(commit.hox_priority.is_none());
+        assert!(commit.hox_status.is_none());
+    }
+
+    #[test]
+    fn test_revset_priority_filter() {
+        // Test that priority(high) matches commits with Priority::High
+        // Setup: create commits with different priorities
+        // Assert: revset evaluates correctly
+    }
+}
+```
+
+**Integration tests** (in `cli/tests/`, using [bats](https://bats-core.readthedocs.io/)):
+
+```bash
+# test_hox_metadata.bats
+@test "set and query priority" {
+    jj describe --set-priority high
+    result=$(jj log -r 'priority(high)' --no-graph -T 'change_id')
+    assert_eq "$result" "$(jj log -r @ --no-graph -T 'change_id')"
+}
+
+@test "wildcard msg_to matching" {
+    jj describe --set-msg-to "O-A-1"
+    assert_eq "$(jj log -r 'msg_to("O-A-*")' --count)" "1"
+    assert_eq "$(jj log -r 'msg_to("O-B-*")' --count)" "0"
+}
+
+@test "backwards compat with vanilla commits" {
+    # Create commit with vanilla jj (simulated by not setting Hox fields)
+    jj describe -m "vanilla commit"
+    # Should have no Hox metadata
+    assert_eq "$(jj log -r @ -T 'hox_priority')" ""
+}
 ```
 
 ---
