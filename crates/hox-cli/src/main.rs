@@ -10,11 +10,15 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use hox_agent::{LoopConfig, Model};
-use hox_core::{OrchestratorId, Task};
+use hox_agent::{BackpressureResult, ExternalLoopState, LoopConfig, Model};
+use hox_core::{HandoffContext, OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
 use hox_jj::{JjCommand, JjExecutor, MetadataManager, RevsetQueries};
-use hox_orchestrator::{Orchestrator, OrchestratorConfig, PhaseManager};
+use hox_orchestrator::{
+    create_initial_state, load_state, run_external_iteration, save_state, Orchestrator,
+    OrchestratorConfig, PhaseManager,
+};
+use hox_planning::{cli_tool_prd, example_prd, PrdDecomposer, ProjectRequirementsDocument};
 use hox_validation::{ByzantineConsensus, ConsensusConfig, Validator, ValidatorConfig};
 use std::path::PathBuf;
 use tracing::{info, Level};
@@ -39,6 +43,18 @@ enum Commands {
         /// Repository path (defaults to current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Generate example PRD template
+        #[arg(long)]
+        prd: bool,
+
+        /// Load PRD from existing JSON file
+        #[arg(long, value_name = "FILE")]
+        from_prd: Option<PathBuf>,
+
+        /// Use CLI tool PRD template (requires --prd)
+        #[arg(long)]
+        cli_tool: bool,
     },
 
     /// Run orchestration on a plan
@@ -138,6 +154,37 @@ enum LoopCommands {
         /// JJ change ID
         change_id: String,
     },
+
+    /// Run single external iteration (bash-orchestratable mode)
+    External {
+        /// JJ change ID of the task to work on
+        #[arg(long)]
+        change_id: String,
+
+        /// Load state from JSON file (omit for first iteration)
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+
+        /// Write updated state to JSON file
+        #[arg(long)]
+        output_state: Option<PathBuf>,
+
+        /// Disable backpressure checks (tests/lints/builds)
+        #[arg(long)]
+        no_backpressure: bool,
+
+        /// Model to use (opus, sonnet, haiku)
+        #[arg(short, long, default_value = "sonnet")]
+        model: CliModel,
+
+        /// Maximum tokens for agent response
+        #[arg(long, default_value = "16000")]
+        max_tokens: usize,
+
+        /// Maximum iterations (for progress display)
+        #[arg(short = 'n', long, default_value = "20")]
+        max_iterations: usize,
+    },
 }
 
 /// CLI-friendly model enum
@@ -196,7 +243,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     match cli.command {
-        Commands::Init { path } => cmd_init(path).await,
+        Commands::Init { path, prd, from_prd, cli_tool } => cmd_init(path, prd, from_prd, cli_tool).await,
         Commands::Orchestrate {
             plan,
             orchestrators,
@@ -216,7 +263,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_init(path: PathBuf) -> Result<()> {
+async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool: bool) -> Result<()> {
     info!("Initializing Hox in {:?}", path);
 
     // Create .hox directory structure
@@ -246,6 +293,78 @@ async fn cmd_init(path: PathBuf) -> Result<()> {
     println!("  .hox/config.json");
     println!("  .hox/patterns/");
     println!("  .hox/metrics/");
+
+    // Handle PRD generation/loading
+    let prd_doc = if let Some(prd_file) = from_prd {
+        // Load existing PRD from file
+        let content = tokio::fs::read_to_string(&prd_file).await
+            .context("Failed to read PRD file")?;
+        let doc: ProjectRequirementsDocument = serde_json::from_str(&content)
+            .context("Failed to parse PRD JSON")?;
+
+        println!("\nLoaded PRD from: {:?}", prd_file);
+        Some(doc)
+    } else if prd {
+        // Generate new PRD based on template
+        let doc = if cli_tool {
+            // Extract project name from current directory
+            let project_name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("my-cli-tool");
+            cli_tool_prd(project_name)
+        } else {
+            example_prd()
+        };
+
+        println!("\nGenerated PRD template");
+        Some(doc)
+    } else {
+        None
+    };
+
+    // If we have a PRD, save it and show decomposition
+    if let Some(doc) = prd_doc {
+        // Save PRD to .hox/prd.json
+        let prd_path = hox_dir.join("prd.json");
+        tokio::fs::write(
+            &prd_path,
+            serde_json::to_string_pretty(&doc)?,
+        )
+        .await?;
+
+        println!("  .hox/prd.json");
+
+        // Decompose and show summary
+        let summary = PrdDecomposer::summarize(&doc);
+        println!("\n{}", summary);
+
+        // Optionally save decomposition details
+        let (phases, tasks) = PrdDecomposer::decompose(&doc);
+
+        let decomposition = serde_json::json!({
+            "phases": phases,
+            "tasks": tasks.iter().map(|t| serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "description": t.description,
+                "priority": t.priority,
+                "phase": t.phase,
+                "status": t.status,
+            })).collect::<Vec<_>>(),
+        });
+
+        tokio::fs::write(
+            hox_dir.join("decomposition.json"),
+            serde_json::to_string_pretty(&decomposition)?,
+        )
+        .await?;
+
+        println!("  .hox/decomposition.json");
+        println!("\nNext steps:");
+        println!("  1. Review and edit .hox/prd.json as needed");
+        println!("  2. Run 'hox orchestrate <plan>' to start execution");
+        println!("  3. Use 'hox status' to monitor progress");
+    }
 
     Ok(())
 }
@@ -579,6 +698,90 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
             manager.set(&change_id, &metadata).await?;
 
             println!("Marked {} as blocked (loop stopped)", change_id);
+        }
+
+        LoopCommands::External {
+            change_id,
+            state_file,
+            output_state,
+            no_backpressure,
+            model,
+            max_tokens,
+            max_iterations,
+        } => {
+            info!(
+                "Running external iteration for {} with model {:?}",
+                change_id, model
+            );
+
+            // Get task description from change
+            let output = jj
+                .exec(&["log", "-r", &change_id, "-T", "description", "--no-graph"])
+                .await?;
+
+            if !output.success {
+                anyhow::bail!("Failed to get change description: {}", output.stderr);
+            }
+
+            let task = Task::new(&change_id, output.stdout.trim());
+
+            // Load or create state
+            let state = if let Some(state_path) = &state_file {
+                load_state(state_path).await?
+            } else {
+                create_initial_state(jj.clone(), &task).await?
+            };
+
+            // Deserialize context from state
+            let context: HandoffContext = serde_json::from_value(state.context.clone())
+                .context("Failed to deserialize context from state")?;
+
+            // Get backpressure from state or create initial
+            let backpressure = state.backpressure.unwrap_or_else(BackpressureResult::all_pass);
+
+            // Next iteration number
+            let iteration = state.iteration + 1;
+
+            // Run single iteration
+            let result = run_external_iteration(
+                &task,
+                &context,
+                &backpressure,
+                iteration,
+                max_iterations,
+                model.into(),
+                max_tokens,
+                &jj.repo_root(),
+                !no_backpressure,
+            )
+            .await?;
+
+            // Output result as JSON to stdout
+            let json = serde_json::to_string_pretty(&result)?;
+            println!("{}", json);
+
+            // Save updated state if requested
+            if let Some(output_path) = output_state {
+                let new_state = ExternalLoopState {
+                    change_id: task.change_id.clone(),
+                    iteration,
+                    context: result.context.clone(),
+                    backpressure: Some(BackpressureResult {
+                        tests_passed: result.success,
+                        lints_passed: result.success,
+                        builds_passed: result.success,
+                        errors: Vec::new(),
+                    }),
+                    files_touched: {
+                        let mut files = state.files_touched.clone();
+                        files.extend(result.files_created.clone());
+                        files.extend(result.files_modified.clone());
+                        files
+                    },
+                };
+
+                save_state(&new_state, &output_path).await?;
+            }
         }
     }
 

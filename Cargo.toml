@@ -7,7 +7,9 @@ members = [
     "crates/hox-validation",
     "crates/hox-metrics",
     "crates/hox-evolution",
+    "crates/hox-planning",
     "crates/hox-cli",
+    "crates/hox-browser",
 ]
 
 resolver = "2"
@@ -76,3 +78,5 @@ hox-orchestrator = { path = "crates/hox-orchestrator" }
 hox-validation = { path = "crates/hox-validation" }
 hox-metrics = { path = "crates/hox-metrics" }
 hox-evolution = { path = "crates/hox-evolution" }
+hox-planning = { path = "crates/hox-planning" }
+hox-browser = { path = "crates/hox-browser" }

@@ -8,12 +8,13 @@
 //!
 //! This prevents context compaction/drift that plagues long-running agents.
 
+use crate::activity_logger::ActivityLogger;
 use crate::backpressure::run_all_checks;
 use crate::prompt::{build_iteration_prompt, parse_context_update};
 use crate::workspace::WorkspaceManager;
 use hox_agent::{
-    execute_file_operations, spawn_agent, BackpressureResult, LoopConfig, LoopResult, StopReason,
-    Usage,
+    execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise, LoopConfig,
+    LoopResult, StopReason, Usage,
 };
 use hox_core::{BackpressureStatus, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
@@ -26,6 +27,7 @@ pub struct LoopEngine<E: JjExecutor> {
     workspace_manager: WorkspaceManager<E>,
     config: LoopConfig,
     workspace_path: PathBuf,
+    activity_logger: Option<ActivityLogger>,
 }
 
 impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
@@ -41,7 +43,14 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             workspace_manager,
             config,
             workspace_path,
+            activity_logger: None,
         }
+    }
+
+    /// Enable activity logging to `.hox/activity.md`
+    pub fn with_activity_logging(mut self, hox_dir: PathBuf) -> Self {
+        self.activity_logger = Some(ActivityLogger::new(hox_dir));
+        self
     }
 
     /// Run the loop on a task
@@ -58,6 +67,14 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
     /// 8. Repeats until all checks pass or max iterations
     pub async fn run(&mut self, task: &Task) -> Result<LoopResult> {
         info!("Starting loop for task: {}", task.change_id);
+
+        // Log loop start if activity logging is enabled
+        if let Some(logger) = &self.activity_logger {
+            logger
+                .log_loop_start(&task.description, self.config.max_iterations)
+                .await
+                .map_err(|e| HoxError::Io(format!("Failed to log loop start: {}", e)))?;
+        }
 
         let mut total_usage = Usage::default();
         let mut files_created: Vec<String> = Vec::new();
@@ -76,9 +93,31 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         for iteration in 1..=self.config.max_iterations {
             info!("=== Iteration {} of {} ===", iteration, self.config.max_iterations);
 
+            // Log iteration start
+            if let Some(logger) = &self.activity_logger {
+                logger
+                    .log_iteration_start(iteration, self.config.max_iterations)
+                    .await
+                    .map_err(|e| HoxError::Io(format!("Failed to log iteration start: {}", e)))?;
+            }
+
             // Check if we're already done
             if backpressure.all_passed() && iteration > 1 {
                 info!("All checks passed, loop complete");
+
+                // Log completion
+                if let Some(logger) = &self.activity_logger {
+                    logger
+                        .log_loop_complete(
+                            iteration - 1,
+                            true,
+                            &total_usage,
+                            "All checks passed"
+                        )
+                        .await
+                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                }
+
                 return Ok(LoopResult {
                     iterations: iteration - 1,
                     success: true,
@@ -129,12 +168,16 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             files_created.extend(exec_result.files_created.clone());
             files_modified.extend(exec_result.files_modified.clone());
 
+            // Store iteration's files before moving exec_result
+            let iteration_files_created = exec_result.files_created;
+            let iteration_files_modified = exec_result.files_modified;
+
             // Update context from agent output
             if let Some(new_context) = parse_context_update(&result.output) {
                 context = new_context;
                 context.loop_iteration = Some(iteration);
-                context.files_touched.extend(exec_result.files_created);
-                context.files_touched.extend(exec_result.files_modified);
+                context.files_touched.extend(iteration_files_created.clone());
+                context.files_touched.extend(iteration_files_modified.clone());
             }
 
             // Run backpressure checks
@@ -159,9 +202,37 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             // Update JJ metadata with current state
             self.update_metadata(task, &context, iteration).await?;
 
-            // Check for agent-requested stop
+            // Log iteration completion
+            if let Some(logger) = &self.activity_logger {
+                logger
+                    .log_iteration_complete(
+                        iteration,
+                        &result.output,
+                        &iteration_files_created,
+                        &iteration_files_modified,
+                        &backpressure,
+                    )
+                    .await
+                    .map_err(|e| HoxError::Io(format!("Failed to log iteration completion: {}", e)))?;
+            }
+
+            // Check for agent-requested stop (legacy format)
             if result.output.contains("[STOP]") || result.output.contains("[DONE]") {
                 info!("Agent requested stop");
+
+                // Log completion
+                if let Some(logger) = &self.activity_logger {
+                    logger
+                        .log_loop_complete(
+                            iteration,
+                            backpressure.all_passed(),
+                            &total_usage,
+                            "Agent requested stop"
+                        )
+                        .await
+                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                }
+
                 return Ok(LoopResult {
                     iterations: iteration,
                     success: backpressure.all_passed(),
@@ -172,10 +243,73 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                     stop_reason: StopReason::AgentStop,
                 });
             }
+
+            // Check for completion promise (Ralph-style)
+            let promise = CompletionPromise::parse(&result.output);
+            if promise.is_complete() {
+                info!("Agent signaled completion via promise");
+                if let Some(reasoning) = &promise.reasoning {
+                    debug!("Completion reasoning: {}", reasoning);
+                }
+                if let Some(confidence) = promise.confidence() {
+                    debug!("Completion confidence: {:.0}%", confidence * 100.0);
+                }
+
+                // If all checks passed, it's a clean completion
+                // Otherwise, agent is requesting completion with checks
+                let stop_reason = if backpressure.all_passed() {
+                    StopReason::PromiseComplete
+                } else {
+                    info!("Promise signaled but validation checks not all passed");
+                    StopReason::PromiseCompleteWithChecks
+                };
+
+                // Log completion
+                if let Some(logger) = &self.activity_logger {
+                    let reason_str = match &stop_reason {
+                        StopReason::PromiseComplete => "Promise complete (all checks passed)",
+                        StopReason::PromiseCompleteWithChecks => "Promise complete (with validation checks)",
+                        _ => "Promise complete",
+                    };
+                    logger
+                        .log_loop_complete(
+                            iteration,
+                            backpressure.all_passed(),
+                            &total_usage,
+                            reason_str
+                        )
+                        .await
+                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                }
+
+                return Ok(LoopResult {
+                    iterations: iteration,
+                    success: backpressure.all_passed(),
+                    final_status: backpressure,
+                    files_created,
+                    files_modified,
+                    total_usage,
+                    stop_reason,
+                });
+            }
         }
 
         // Max iterations reached
         warn!("Max iterations ({}) reached", self.config.max_iterations);
+
+        // Log completion
+        if let Some(logger) = &self.activity_logger {
+            logger
+                .log_loop_complete(
+                    self.config.max_iterations,
+                    backpressure.all_passed(),
+                    &total_usage,
+                    "Max iterations reached"
+                )
+                .await
+                .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+        }
+
         Ok(LoopResult {
             iterations: self.config.max_iterations,
             success: backpressure.all_passed(),

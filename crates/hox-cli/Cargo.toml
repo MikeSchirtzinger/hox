@@ -19,6 +19,7 @@ hox-orchestrator = { workspace = true }
 hox-validation = { workspace = true }
 hox-metrics = { workspace = true }
 hox-evolution = { workspace = true }
+hox-planning = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

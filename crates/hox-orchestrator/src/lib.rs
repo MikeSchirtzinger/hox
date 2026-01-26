@@ -11,17 +11,23 @@
 
 #![allow(dead_code)]
 
+mod activity_logger;
 mod backpressure;
 mod communication;
 mod loop_engine;
+mod loop_external;
 mod orchestrator;
 mod phases;
 mod prompt;
 mod workspace;
 
+pub use activity_logger::ActivityLogger;
 pub use backpressure::{format_errors_for_prompt, run_all_checks};
 pub use communication::{Message, MessageRouter};
 pub use loop_engine::LoopEngine;
+pub use loop_external::{
+    create_initial_state, load_state, run_external_iteration, save_state,
+};
 pub use orchestrator::{Orchestrator, OrchestratorConfig, OrchestratorState};
 pub use phases::{PhaseManager, PhaseStatus};
 pub use prompt::{build_iteration_prompt, build_simple_prompt, parse_context_update};

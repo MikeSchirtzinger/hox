@@ -31,5 +31,12 @@ reqwest = { version = "0.12", features = ["json"] }
 # Logging
 tracing = { workspace = true }
 
+# Browser automation for screenshots
+headless_chrome = { version = "1.0", optional = true }
+
+[features]
+default = []
+screenshots = ["headless_chrome"]
+
 [dev-dependencies]
 tempfile = { workspace = true }

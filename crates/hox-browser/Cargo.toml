@@ -1,6 +1,6 @@
 [package]
-name = "hox-orchestrator"
-description = "Multi-agent orchestration engine for Hox"
+name = "hox-browser"
+description = "Browser automation and visual verification for Hox orchestration"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,18 +8,28 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-hox-core = { workspace = true }
-hox-jj = { workspace = true }
+# Core
 hox-agent = { workspace = true }
-hox-metrics = { workspace = true }
+hox-core = { workspace = true }
+
+# Browser automation
+headless_chrome = "1.0"
+
+# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Error handling
 thiserror = { workspace = true }
+
+# Async
 tokio = { workspace = true }
-async-trait = { workspace = true }
+
+# Logging
 tracing = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
+
+[features]
+default = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

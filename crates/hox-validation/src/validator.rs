@@ -2,6 +2,7 @@
 
 use hox_core::{ChangeId, Result, ScoringWeights};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for a validator
 #[derive(Debug, Clone)]
@@ -45,6 +46,17 @@ pub enum ValidationCheck {
     Custom(String),
 }
 
+/// Artifact metadata for validation results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationArtifactRef {
+    /// Relative path from .hox/artifacts/
+    pub path: PathBuf,
+    /// Artifact type description
+    pub artifact_type: String,
+    /// Human-readable description
+    pub description: String,
+}
+
 /// Result of a single validation check
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
@@ -52,6 +64,9 @@ pub struct CheckResult {
     pub passed: bool,
     pub score: f32,
     pub details: String,
+    /// Validation artifacts (screenshots, logs, etc.)
+    #[serde(default)]
+    pub artifacts: Vec<ValidationArtifactRef>,
 }
 
 /// Result of validation
@@ -178,6 +193,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: "Compilation check placeholder".to_string(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -188,6 +204,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: "Tests check placeholder".to_string(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -198,6 +215,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: "Mutation compliance check placeholder".to_string(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -208,6 +226,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: "Contract adherence check placeholder".to_string(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -218,6 +237,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: "Code quality check placeholder".to_string(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -227,6 +247,7 @@ impl Validator {
             passed: true,
             score: 1.0,
             details: format!("Custom check '{}' placeholder", name),
+            artifacts: Vec::new(),
         })
     }
 
