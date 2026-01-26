@@ -1,0 +1,9 @@
+/Users/mike/dev/hox/jj-fork/target/debug/deps/gix_worktree_state-90f1cd97242e833c.d: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/mod.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/chunk.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/entry.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/function.rs
+
+/Users/mike/dev/hox/jj-fork/target/debug/deps/libgix_worktree_state-90f1cd97242e833c.rmeta: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/mod.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/chunk.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/entry.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/function.rs
+
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/lib.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/mod.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/chunk.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/entry.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-state-0.24.0/src/checkout/function.rs:

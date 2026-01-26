@@ -10,6 +10,7 @@ members = [
     "crates/hox-planning",
     "crates/hox-cli",
     "crates/hox-browser",
+    "crates/hox-dashboard",
 ]
 
 resolver = "2"
@@ -80,3 +81,4 @@ hox-metrics = { path = "crates/hox-metrics" }
 hox-evolution = { path = "crates/hox-evolution" }
 hox-planning = { path = "crates/hox-planning" }
 hox-browser = { path = "crates/hox-browser" }
+hox-dashboard = { path = "crates/hox-dashboard" }

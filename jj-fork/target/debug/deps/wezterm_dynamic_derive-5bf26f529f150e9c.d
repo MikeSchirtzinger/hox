@@ -1,0 +1,9 @@
+/Users/mike/dev/hox/jj-fork/target/debug/deps/wezterm_dynamic_derive-5bf26f529f150e9c.d: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/attr.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/bound.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/fromdynamic.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/todynamic.rs
+
+/Users/mike/dev/hox/jj-fork/target/debug/deps/libwezterm_dynamic_derive-5bf26f529f150e9c.dylib: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/attr.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/bound.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/fromdynamic.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/todynamic.rs
+
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/lib.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/attr.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/bound.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/fromdynamic.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wezterm-dynamic-derive-0.1.1/src/todynamic.rs:

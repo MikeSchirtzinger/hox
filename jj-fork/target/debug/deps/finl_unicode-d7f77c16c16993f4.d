@@ -1,0 +1,10 @@
+/Users/mike/dev/hox/jj-fork/target/debug/deps/finl_unicode-d7f77c16c16993f4.d: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/categories.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/grapheme_clusters.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/mod.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/characters.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/grapheme_property.rs
+
+/Users/mike/dev/hox/jj-fork/target/debug/deps/libfinl_unicode-d7f77c16c16993f4.rmeta: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/categories.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/grapheme_clusters.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/mod.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/characters.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/grapheme_property.rs
+
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/lib.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/categories.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/grapheme_clusters.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/mod.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/characters.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/finl_unicode-1.3.0/src/data/grapheme_property.rs:

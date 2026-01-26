@@ -1,0 +1,10 @@
+/Users/mike/dev/hox/jj-fork/target/debug/deps/gix_config_value-c0aa6d17d1376011.d: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/boolean.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/color.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/integer.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/path.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/types.rs
+
+/Users/mike/dev/hox/jj-fork/target/debug/deps/libgix_config_value-c0aa6d17d1376011.rmeta: /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/lib.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/boolean.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/color.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/integer.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/path.rs /Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/types.rs
+
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/lib.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/boolean.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/color.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/integer.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/path.rs:
+/Users/mike/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-config-value-0.16.0/src/types.rs:

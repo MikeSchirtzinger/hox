@@ -120,6 +120,17 @@ enum Commands {
         #[command(subcommand)]
         action: LoopCommands,
     },
+
+    /// Launch the observability dashboard
+    Dashboard {
+        /// Refresh interval in milliseconds
+        #[arg(short, long, default_value = "500")]
+        refresh: u64,
+
+        /// Maximum oplog entries to show
+        #[arg(long, default_value = "50")]
+        max_oplog: usize,
+    },
 }
 
 /// Loop subcommands for Ralph-style autonomous iteration
@@ -260,6 +271,7 @@ async fn main() -> Result<()> {
             orchestrator,
         } => cmd_set(priority, status, agent, orchestrator).await,
         Commands::Loop { action } => cmd_loop(action).await,
+        Commands::Dashboard { refresh, max_oplog } => cmd_dashboard(refresh, max_oplog).await,
     }
 }
 
@@ -784,6 +796,21 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+async fn cmd_dashboard(refresh_ms: u64, max_oplog: usize) -> Result<()> {
+    info!("Launching observability dashboard");
+
+    let config = hox_dashboard::DashboardConfig {
+        refresh_ms,
+        max_oplog_entries: max_oplog,
+        local_time: true,
+        metrics_path: None,
+    };
+
+    hox_dashboard::run(config).await?;
 
     Ok(())
 }
