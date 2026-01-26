@@ -1,0 +1,37 @@
+[package]
+name = "hox-dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-based observability dashboard for Hox orchestration"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+hox-core = { path = "../hox-core" }
+hox-metrics = { path = "../hox-metrics" }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "sync"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []

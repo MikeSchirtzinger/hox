@@ -16,12 +16,18 @@
 //!
 //! This prevents context compaction/drift that plagues long-running agents.
 
+mod artifact_manager;
 mod auth;
 mod circuit_breaker;
 mod client;
 mod file_executor;
+mod promise;
 mod types;
 
+pub use artifact_manager::{
+    artifact_capture_instructions, capture_screenshot_cdp, ArtifactManager, ArtifactType,
+    ValidationArtifact,
+};
 pub use auth::get_auth_token;
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use client::{spawn_agent, AgentClient};
@@ -29,4 +35,5 @@ pub use file_executor::{
     execute_file_operations, file_operation_instructions, validate_path, ExecutionResult,
     FileOperation,
 };
+pub use promise::CompletionPromise;
 pub use types::*;

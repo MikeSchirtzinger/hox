@@ -22,3 +22,7 @@ Thumbs.db
 *.gcda
 *.gcno
 *.backup
+jj-fork/
+
+# JJ fork dev directory
+jj-fork/

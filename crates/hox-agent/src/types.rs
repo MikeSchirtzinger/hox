@@ -178,10 +178,53 @@ pub enum StopReason {
     MaxIterations,
     /// Agent requested stop
     AgentStop,
+    /// Agent signaled completion via <promise>COMPLETE</promise>
+    PromiseComplete,
+    /// Agent signaled completion with validation checks requested
+    PromiseCompleteWithChecks,
     /// Error occurred
     Error(String),
     /// User cancelled
     Cancelled,
+}
+
+/// External orchestration state (JSON-serializable)
+/// Used for bash-orchestratable single-iteration mode with JSON interchange
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalLoopState {
+    /// JJ change ID being worked on
+    pub change_id: String,
+    /// Current iteration number
+    pub iteration: usize,
+    /// Handoff context from previous iteration
+    #[serde(flatten)]
+    pub context: serde_json::Value,
+    /// Backpressure result from previous iteration
+    pub backpressure: Option<BackpressureResult>,
+    /// Files touched so far
+    pub files_touched: Vec<String>,
+}
+
+/// Result from a single external iteration
+/// This is output as JSON to stdout for external orchestration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalLoopResult {
+    /// Iteration number
+    pub iteration: usize,
+    /// Whether this iteration succeeded
+    pub success: bool,
+    /// Agent's raw output text
+    pub output: String,
+    /// Updated context (JSON for forward compatibility)
+    pub context: serde_json::Value,
+    /// Files created in this iteration
+    pub files_created: Vec<String>,
+    /// Files modified in this iteration
+    pub files_modified: Vec<String>,
+    /// Token usage for this iteration
+    pub usage: Option<Usage>,
+    /// Stop signal if present ("[DONE]", "promise", etc.)
+    pub stop_signal: Option<String>,
 }
 
 #[cfg(test)]

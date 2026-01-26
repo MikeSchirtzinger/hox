@@ -401,12 +401,19 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         // Create workspace manager clone for the loop engine
         let workspace_manager = WM::new(self.executor.clone());
 
+        // Create .hox directory if it doesn't exist
+        let hox_dir = self.config.repo_root.join(".hox");
+        tokio::fs::create_dir_all(&hox_dir).await.map_err(|e| {
+            HoxError::Io(format!("Failed to create .hox directory: {}", e))
+        })?;
+
         let mut loop_engine = LoopEngine::new(
             self.executor.clone(),
             workspace_manager,
             config,
             self.config.repo_root.clone(),
-        );
+        )
+        .with_activity_logging(hox_dir);
 
         loop_engine.run(&task).await
     }

@@ -14,9 +14,15 @@ const PROTECTED_FILES: &[&str] = &[".git", ".env", "Cargo.lock", ".secrets", ".g
 
 /// A file operation parsed from agent output
 #[derive(Debug, Clone)]
-pub struct FileOperation {
-    pub path: String,
-    pub content: String,
+pub enum FileOperation {
+    /// Write content to a file
+    WriteToFile { path: String, content: String },
+    /// Capture a screenshot
+    CaptureScreenshot {
+        url: String,
+        name: String,
+        selector: Option<String>,
+    },
 }
 
 /// Result of executing file operations from agent output
@@ -26,6 +32,8 @@ pub struct ExecutionResult {
     pub files_created: Vec<String>,
     /// Files that were modified
     pub files_modified: Vec<String>,
+    /// Screenshots captured
+    pub screenshots_captured: Vec<String>,
     /// Errors encountered during execution
     pub errors: Vec<String>,
 }
@@ -41,6 +49,9 @@ impl ExecutionResult {
         if !self.files_modified.is_empty() {
             parts.push(format!("{} modified", self.files_modified.len()));
         }
+        if !self.screenshots_captured.is_empty() {
+            parts.push(format!("{} screenshots", self.screenshots_captured.len()));
+        }
         if !self.errors.is_empty() {
             parts.push(format!("{} errors", self.errors.len()));
         }
@@ -54,7 +65,9 @@ impl ExecutionResult {
 
     /// Check if any changes were made
     pub fn has_changes(&self) -> bool {
-        !self.files_created.is_empty() || !self.files_modified.is_empty()
+        !self.files_created.is_empty()
+            || !self.files_modified.is_empty()
+            || !self.screenshots_captured.is_empty()
     }
 
     /// Check if there were any errors
@@ -67,24 +80,60 @@ impl ExecutionResult {
 pub fn execute_file_operations(output: &str) -> ExecutionResult {
     let mut result = ExecutionResult::default();
 
-    for write_op in parse_write_blocks(output) {
-        match execute_write(&write_op.path, &write_op.content) {
-            Ok(created) => {
-                if created {
-                    result.files_created.push(write_op.path);
-                } else {
-                    result.files_modified.push(write_op.path);
+    for op in parse_operations(output) {
+        match op {
+            FileOperation::WriteToFile { path, content } => {
+                match execute_write(&path, &content) {
+                    Ok(created) => {
+                        if created {
+                            result.files_created.push(path);
+                        } else {
+                            result.files_modified.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(format!("Failed to write {}: {}", path, e));
+                    }
                 }
             }
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Failed to write {}: {}", write_op.path, e));
+            FileOperation::CaptureScreenshot {
+                url,
+                name,
+                selector,
+            } => {
+                // For now, just log that screenshot was requested
+                // Actual capture requires async runtime and browser
+                tracing::info!(
+                    "Screenshot requested: {} (url={}, selector={:?})",
+                    name,
+                    url,
+                    selector
+                );
+                result.screenshots_captured.push(name.clone());
+                result.errors.push(format!(
+                    "Screenshot capture '{}' requires async runtime - not yet implemented in sync context",
+                    name
+                ));
             }
         }
     }
 
     result
+}
+
+/// Parse all file operations from text
+fn parse_operations(text: &str) -> Vec<FileOperation> {
+    let mut operations = Vec::new();
+
+    // Parse write operations
+    operations.extend(parse_write_blocks(text));
+
+    // Parse screenshot operations
+    operations.extend(parse_screenshot_blocks(text));
+
+    operations
 }
 
 /// Parse all <write_to_file> blocks from text
@@ -111,14 +160,51 @@ fn parse_write_blocks(text: &str) -> Vec<FileOperation> {
     operations
 }
 
+/// Parse all <capture_screenshot> blocks from text
+fn parse_screenshot_blocks(text: &str) -> Vec<FileOperation> {
+    let mut operations = Vec::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<capture_screenshot>") {
+        let block_start = start + "<capture_screenshot>".len();
+
+        if let Some(end) = remaining[block_start..].find("</capture_screenshot>") {
+            let block_content = &remaining[block_start..block_start + end];
+
+            if let Some(op) = parse_single_screenshot_block(block_content) {
+                operations.push(op);
+            }
+
+            remaining = &remaining[block_start + end + "</capture_screenshot>".len()..];
+        } else {
+            break;
+        }
+    }
+
+    operations
+}
+
 /// Parse a single write block content to extract path and content
 fn parse_single_write_block(block: &str) -> Option<FileOperation> {
     let path = extract_tag_content(block, "path")?;
     let content = extract_tag_content(block, "content")?;
 
-    Some(FileOperation {
+    Some(FileOperation::WriteToFile {
         path: path.trim().to_string(),
         content,
+    })
+}
+
+/// Parse a single screenshot block content
+fn parse_single_screenshot_block(block: &str) -> Option<FileOperation> {
+    let url = extract_tag_content(block, "url")?;
+    let name = extract_tag_content(block, "name")?;
+    let selector = extract_tag_content(block, "selector");
+
+    Some(FileOperation::CaptureScreenshot {
+        url: url.trim().to_string(),
+        name: name.trim().to_string(),
+        selector: selector.map(|s| s.trim().to_string()),
     })
 }
 
@@ -222,12 +308,23 @@ fn example() {
 </write_to_file>
 ```
 
+To capture screenshots for visual validation:
+
+```
+<capture_screenshot>
+<url>http://localhost:3000</url>
+<name>ui-save-button</name>
+<selector>.save-button</selector>
+</capture_screenshot>
+```
+
 IMPORTANT:
 - Use relative paths from project root
 - Parent directories are created automatically
 - Include COMPLETE file content (not patches)
 - You can write multiple files in one response
 - Files are written AFTER your response completes
+- Screenshots require browser with CDP enabled
 
 Example - creating a new module:
 
@@ -251,6 +348,14 @@ mod tests {
 }
 </content>
 </write_to_file>
+
+Example - capturing UI state:
+
+<capture_screenshot>
+<url>http://localhost:3000/dashboard</url>
+<name>dashboard-layout</name>
+<selector>#main-content</selector>
+</capture_screenshot>
 "#
 }
 
@@ -282,8 +387,13 @@ Some text after
 
         let ops = parse_write_blocks(output);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0].path, "src/test.rs");
-        assert!(ops[0].content.contains("fn hello()"));
+        match &ops[0] {
+            FileOperation::WriteToFile { path, content } => {
+                assert_eq!(path, "src/test.rs");
+                assert!(content.contains("fn hello()"));
+            }
+            _ => panic!("Expected WriteToFile operation"),
+        }
     }
 
     #[test]
@@ -302,8 +412,57 @@ Some text after
 
         let ops = parse_write_blocks(output);
         assert_eq!(ops.len(), 2);
-        assert_eq!(ops[0].path, "file1.rs");
-        assert_eq!(ops[1].path, "file2.rs");
+        match &ops[0] {
+            FileOperation::WriteToFile { path, .. } => assert_eq!(path, "file1.rs"),
+            _ => panic!("Expected WriteToFile operation"),
+        }
+        match &ops[1] {
+            FileOperation::WriteToFile { path, .. } => assert_eq!(path, "file2.rs"),
+            _ => panic!("Expected WriteToFile operation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_screenshot_block() {
+        let output = r#"
+<capture_screenshot>
+<url>http://localhost:3000</url>
+<name>test-screenshot</name>
+<selector>.my-element</selector>
+</capture_screenshot>
+"#;
+
+        let ops = parse_screenshot_blocks(output);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            FileOperation::CaptureScreenshot { url, name, selector } => {
+                assert_eq!(url, "http://localhost:3000");
+                assert_eq!(name, "test-screenshot");
+                assert_eq!(selector.as_deref(), Some(".my-element"));
+            }
+            _ => panic!("Expected CaptureScreenshot operation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_screenshot_without_selector() {
+        let output = r#"
+<capture_screenshot>
+<url>http://example.com</url>
+<name>full-page</name>
+</capture_screenshot>
+"#;
+
+        let ops = parse_screenshot_blocks(output);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            FileOperation::CaptureScreenshot { url, name, selector } => {
+                assert_eq!(url, "http://example.com");
+                assert_eq!(name, "full-page");
+                assert!(selector.is_none());
+            }
+            _ => panic!("Expected CaptureScreenshot operation"),
+        }
     }
 
     #[test]

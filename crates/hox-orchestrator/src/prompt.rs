@@ -138,7 +138,19 @@ pub fn build_iteration_prompt(
     prompt.push_str("PROGRESS: <what was completed this iteration>\n");
     prompt.push_str("NEXT: <what needs to happen next>\n");
     prompt.push_str("BLOCKERS: <any blockers, or 'none'>\n");
-    prompt.push_str("```\n");
+    prompt.push_str("```\n\n");
+
+    // Completion signal instructions
+    prompt.push_str("## COMPLETION SIGNAL\n\n");
+    prompt.push_str("When the task is fully complete and all validation checks pass, signal completion:\n\n");
+    prompt.push_str("<promise>COMPLETE</promise>\n\n");
+    prompt.push_str("Optionally include reasoning for completion:\n\n");
+    prompt.push_str("<completion_reasoning>\n");
+    prompt.push_str("Explanation of what was completed and why the task is done.\n");
+    prompt.push_str("Confidence: XX%\n");
+    prompt.push_str("</completion_reasoning>\n\n");
+    prompt.push_str("Note: Only use this when the task is genuinely complete.\n");
+    prompt.push_str("Legacy formats [STOP] and [DONE] are also supported.\n");
 
     prompt
 }
