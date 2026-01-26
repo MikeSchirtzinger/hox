@@ -2,6 +2,7 @@
 //!
 //! Renders a visual DAG showing phases and agents with progress bars.
 
+use super::status_color_from_name;
 use crate::{DashboardState, PhaseProgress, PhaseStatus};
 use ratatui::{
     prelude::*,
@@ -205,7 +206,7 @@ impl AgentGraphWidget {
                     agent.status.indicator().to_string()
                 };
 
-                let agent_color = Self::status_to_color(agent.status.color_name());
+                let agent_color = status_color_from_name(agent.status.color_name());
                 buf.set_string(
                     area.x + 1,
                     y,
@@ -230,18 +231,6 @@ impl AgentGraphWidget {
         let filled = (progress * width as f32) as usize;
         let empty = width.saturating_sub(filled);
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
-    }
-
-    /// Convert color name string to ratatui Color
-    fn status_to_color(color_name: &str) -> Color {
-        match color_name {
-            "gray" => Color::DarkGray,
-            "yellow" => Color::Yellow,
-            "green" => Color::Green,
-            "red" => Color::Red,
-            "magenta" => Color::Magenta,
-            _ => Color::White,
-        }
     }
 }
 

@@ -8,7 +8,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::process::Command;
+use tokio::process::Command;
 
 /// JJ data source for live oplog and state tracking
 pub struct JjDataSource {
@@ -58,8 +58,9 @@ impl JjDataSource {
     /// Get current JJ bookmark
     pub async fn current_bookmark(&self) -> Option<String> {
         let output = Command::new("jj")
-            .args(&["bookmark", "list", "--all"])
+            .args(["bookmark", "list", "--all"])
             .output()
+            .await
             .ok()?;
 
         if !output.status.success() {
@@ -80,7 +81,7 @@ impl JjDataSource {
 /// Fetch recent JJ operation log entries
 pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
     let output = Command::new("jj")
-        .args(&[
+        .args([
             "op",
             "log",
             "--no-graph",
@@ -90,6 +91,7 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
             r#"id ++ "|" ++ time.start().format("%Y-%m-%d %H:%M:%S") ++ "|" ++ description ++ "\n""#,
         ])
         .output()
+        .await
         .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj: {}", e)))?;
 
     if !output.status.success() {
@@ -338,7 +340,7 @@ pub fn estimate_agent_progress(agent: &AgentNode, recent_ops: &[&JjOplogEntry]) 
 }
 
 /// Calculate global metrics from agents and oplog
-fn calculate_global_metrics(agents: &[AgentNode], _oplog: &[JjOplogEntry]) -> GlobalMetrics {
+fn calculate_global_metrics(agents: &[AgentNode], oplog: &[JjOplogEntry]) -> GlobalMetrics {
     let mut total_tool_calls = 0;
     let mut total_failures = 0;
     let mut total_time_ms = 0;
@@ -349,6 +351,15 @@ fn calculate_global_metrics(agents: &[AgentNode], _oplog: &[JjOplogEntry]) -> Gl
             total_failures += 1;
         }
         total_time_ms += agent.duration_ms;
+    }
+
+    // Supplement tool calls from oplog if agents have no recorded calls
+    // Each significant oplog entry (Commit, Describe, Squash) represents work
+    if total_tool_calls == 0 && !oplog.is_empty() {
+        total_tool_calls = oplog
+            .iter()
+            .filter(|e| matches!(e.op_type, JjOpType::Commit | JjOpType::Describe | JjOpType::Squash))
+            .count() as u32;
     }
 
     let active_agents = agents.iter().filter(|a| a.status == AgentStatus::Running).count();

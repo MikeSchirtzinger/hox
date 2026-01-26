@@ -76,13 +76,16 @@ impl ActivityLogger {
     /// Log the completion of an iteration
     pub async fn log_iteration_complete(
         &self,
-        _iteration: usize,
+        iteration: usize,
         agent_output: &str,
         files_created: &[String],
         files_modified: &[String],
         backpressure: &BackpressureResult,
     ) -> Result<(), std::io::Error> {
         let mut content = String::new();
+
+        // Iteration completion marker
+        content.push_str(&format!("**Iteration {} completed**\n\n", iteration));
 
         // Backpressure status
         content.push_str(&format!(
