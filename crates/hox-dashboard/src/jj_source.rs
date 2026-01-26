@@ -1,6 +1,28 @@
 //! JJ oplog data source
 //!
 //! Parses JJ operation log and builds dashboard state from live data.
+//!
+//! # Trailer-based Agent Metadata
+//!
+//! This module supports structured agent metadata using jj commit trailers.
+//! Agents should include trailers in their commit descriptions:
+//!
+//! ```text
+//! Implement feature X
+//!
+//! Working on the authentication module.
+//!
+//! Hox-Agent: agent-abc123
+//! Hox-Phase: 1
+//! Hox-Task: Implement OAuth2 flow
+//! Hox-Status: running
+//! ```
+//!
+//! Supported trailers:
+//! - `Hox-Agent`: Agent identifier (required for agent tracking)
+//! - `Hox-Phase`: Phase number (integer)
+//! - `Hox-Task`: Task description
+//! - `Hox-Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
     AgentNode, AgentStatus, DashboardConfig, DashboardState, DashboardError, GlobalMetrics,
@@ -9,6 +31,31 @@ use crate::{
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use tokio::process::Command;
+
+/// Standard Hox trailer keys
+pub mod trailers {
+    /// Agent identifier trailer key
+    pub const AGENT: &str = "Hox-Agent";
+    /// Phase number trailer key
+    pub const PHASE: &str = "Hox-Phase";
+    /// Task description trailer key
+    pub const TASK: &str = "Hox-Task";
+    /// Status trailer key
+    pub const STATUS: &str = "Hox-Status";
+    /// Change ID trailer key (for linking to jj changes)
+    pub const CHANGE_ID: &str = "Hox-Change";
+}
+
+/// Parsed commit with trailer metadata
+#[derive(Debug, Clone)]
+pub struct CommitWithTrailers {
+    /// Change ID
+    pub change_id: String,
+    /// Commit description (first line)
+    pub description: String,
+    /// Parsed trailers as key-value pairs
+    pub trailers: HashMap<String, String>,
+}
 
 /// JJ data source for live oplog and state tracking
 pub struct JjDataSource {
@@ -24,11 +71,21 @@ impl JjDataSource {
     /// Fetch current dashboard state from JJ and metrics
     pub async fn fetch_state(&self) -> Result<DashboardState> {
         // Fetch all data concurrently
-        let oplog = fetch_oplog(self.config.max_oplog_entries).await?;
-        let bookmark = self.current_bookmark().await;
+        let (oplog, commits, bookmark) = tokio::join!(
+            fetch_oplog(self.config.max_oplog_entries),
+            fetch_commits_with_trailers(self.config.max_oplog_entries),
+            self.current_bookmark()
+        );
 
-        // Extract agent information from oplog
-        let agents = extract_agents_from_oplog(&oplog);
+        let oplog = oplog?;
+        let commits = commits.unwrap_or_default();
+
+        // Extract agent information - prefer trailers, fall back to oplog parsing
+        let agents = if !commits.is_empty() {
+            extract_agents_from_trailers(&commits, &oplog)
+        } else {
+            extract_agents_from_oplog(&oplog)
+        };
 
         // Build session info
         let session = OrchestrationSession {
@@ -124,6 +181,164 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
     entries.reverse();
 
     Ok(entries)
+}
+
+/// Fetch recent commits with their trailers for agent metadata extraction
+///
+/// Uses jj log with a template that extracts trailers in a parseable format.
+/// Returns commits that have Hox-Agent trailers.
+pub async fn fetch_commits_with_trailers(limit: usize) -> Result<Vec<CommitWithTrailers>> {
+    // Template outputs: change_id|description_first_line|trailer1=value1,trailer2=value2
+    // We use trailers().map() to format each trailer as key=value
+    let template = r#"change_id.short() ++ "|" ++ description.first_line() ++ "|" ++ trailers.map(|t| t.key() ++ "=" ++ t.value()).join(",") ++ "\n""#;
+
+    let output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-n",
+            &limit.to_string(),
+            "-T",
+            template,
+        ])
+        .output()
+        .await
+        .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj log: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DashboardError::JjOplog(format!(
+            "jj log failed: {}",
+            stderr
+        )));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| DashboardError::JjOplog(format!("Invalid UTF-8 in jj log: {}", e)))?;
+
+    let mut commits = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(commit) = parse_commit_with_trailers(line) {
+            // Only include commits that have Hox-Agent trailer
+            if commit.trailers.contains_key(trailers::AGENT) {
+                commits.push(commit);
+            }
+        }
+    }
+
+    Ok(commits)
+}
+
+/// Parse a commit line with trailers
+fn parse_commit_with_trailers(line: &str) -> Option<CommitWithTrailers> {
+    let parts: Vec<&str> = line.splitn(3, '|').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let change_id = parts[0].trim().to_string();
+    let description = parts[1].trim().to_string();
+    let trailers_str = parts[2].trim();
+
+    let mut trailers = HashMap::new();
+    if !trailers_str.is_empty() {
+        for trailer in trailers_str.split(',') {
+            if let Some((key, value)) = trailer.split_once('=') {
+                trailers.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+    }
+
+    Some(CommitWithTrailers {
+        change_id,
+        description,
+        trailers,
+    })
+}
+
+/// Extract agent nodes from commits with trailers
+///
+/// This is the preferred method when jj-dev trailers are available.
+fn extract_agents_from_trailers(commits: &[CommitWithTrailers], oplog: &[JjOplogEntry]) -> Vec<AgentNode> {
+    let mut agents_map: HashMap<String, AgentNode> = HashMap::new();
+
+    for commit in commits {
+        if let Some(agent_id) = commit.trailers.get(trailers::AGENT) {
+            let phase = commit
+                .trailers
+                .get(trailers::PHASE)
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(1);
+
+            let status = commit
+                .trailers
+                .get(trailers::STATUS)
+                .map(|s| parse_status(s))
+                .unwrap_or(AgentStatus::Running);
+
+            let task = commit
+                .trailers
+                .get(trailers::TASK)
+                .cloned()
+                .unwrap_or_else(|| commit.description.clone());
+
+            let agent = agents_map.entry(agent_id.clone()).or_insert_with(|| {
+                let mut node = AgentNode::new(agent_id.clone(), agent_id.clone(), phase);
+                node.status = status;
+                node.task = task.clone();
+                node.change_id = Some(commit.change_id.clone());
+                node
+            });
+
+            // Update with latest info if already exists
+            agent.status = status;
+            if !task.is_empty() {
+                agent.task = task;
+            }
+            agent.change_id = Some(commit.change_id.clone());
+
+            // Count operations for this agent in oplog
+            let agent_ops = oplog
+                .iter()
+                .filter(|e| e.agent_id.as_ref() == Some(agent_id))
+                .count();
+            agent.tool_calls = agent_ops as u32;
+        }
+    }
+
+    // Estimate progress for running agents
+    for (agent_id, agent) in agents_map.iter_mut() {
+        if agent.status == AgentStatus::Running {
+            let agent_ops: Vec<_> = oplog
+                .iter()
+                .filter(|e| e.agent_id.as_ref() == Some(agent_id))
+                .collect();
+            agent.progress = estimate_agent_progress(agent, &agent_ops);
+        } else if agent.status == AgentStatus::Completed {
+            agent.progress = 1.0;
+        }
+    }
+
+    let mut agents: Vec<_> = agents_map.into_values().collect();
+    agents.sort_by_key(|a| (a.phase, a.id.clone()));
+    agents
+}
+
+/// Parse status string to AgentStatus
+fn parse_status(s: &str) -> AgentStatus {
+    match s.to_lowercase().as_str() {
+        "pending" => AgentStatus::Pending,
+        "running" => AgentStatus::Running,
+        "completed" | "done" | "complete" => AgentStatus::Completed,
+        "failed" | "error" => AgentStatus::Failed,
+        "blocked" => AgentStatus::Blocked,
+        _ => AgentStatus::Running,
+    }
 }
 
 /// Parse a single oplog line
@@ -509,5 +724,81 @@ mod tests {
         agents[0].status = AgentStatus::Completed;
         agents[1].status = AgentStatus::Running;
         assert_eq!(infer_current_phase(&agents), 2);
+    }
+
+    #[test]
+    fn test_parse_commit_with_trailers() {
+        let line = "abc123|Implement feature X|Hox-Agent=agent-xyz,Hox-Phase=2,Hox-Task=OAuth flow";
+        let commit = parse_commit_with_trailers(line).expect("Failed to parse");
+        assert_eq!(commit.change_id, "abc123");
+        assert_eq!(commit.description, "Implement feature X");
+        assert_eq!(commit.trailers.get("Hox-Agent"), Some(&"agent-xyz".to_string()));
+        assert_eq!(commit.trailers.get("Hox-Phase"), Some(&"2".to_string()));
+        assert_eq!(commit.trailers.get("Hox-Task"), Some(&"OAuth flow".to_string()));
+    }
+
+    #[test]
+    fn test_parse_commit_with_trailers_empty() {
+        let line = "def456|Simple commit|";
+        let commit = parse_commit_with_trailers(line).expect("Failed to parse");
+        assert_eq!(commit.change_id, "def456");
+        assert_eq!(commit.description, "Simple commit");
+        assert!(commit.trailers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status() {
+        assert_eq!(parse_status("running"), AgentStatus::Running);
+        assert_eq!(parse_status("RUNNING"), AgentStatus::Running);
+        assert_eq!(parse_status("completed"), AgentStatus::Completed);
+        assert_eq!(parse_status("done"), AgentStatus::Completed);
+        assert_eq!(parse_status("failed"), AgentStatus::Failed);
+        assert_eq!(parse_status("error"), AgentStatus::Failed);
+        assert_eq!(parse_status("pending"), AgentStatus::Pending);
+        assert_eq!(parse_status("blocked"), AgentStatus::Blocked);
+        assert_eq!(parse_status("unknown"), AgentStatus::Running); // default
+    }
+
+    #[test]
+    fn test_extract_agents_from_trailers() {
+        let commits = vec![
+            CommitWithTrailers {
+                change_id: "abc123".to_string(),
+                description: "Implement auth".to_string(),
+                trailers: [
+                    (trailers::AGENT.to_string(), "agent-001".to_string()),
+                    (trailers::PHASE.to_string(), "1".to_string()),
+                    (trailers::STATUS.to_string(), "running".to_string()),
+                    (trailers::TASK.to_string(), "OAuth2 flow".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            CommitWithTrailers {
+                change_id: "def456".to_string(),
+                description: "Add tests".to_string(),
+                trailers: [
+                    (trailers::AGENT.to_string(), "agent-002".to_string()),
+                    (trailers::PHASE.to_string(), "2".to_string()),
+                    (trailers::STATUS.to_string(), "completed".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ];
+
+        let agents = extract_agents_from_trailers(&commits, &[]);
+        assert_eq!(agents.len(), 2);
+
+        let agent1 = agents.iter().find(|a| a.id == "agent-001").unwrap();
+        assert_eq!(agent1.phase, 1);
+        assert_eq!(agent1.status, AgentStatus::Running);
+        assert_eq!(agent1.task, "OAuth2 flow");
+        assert_eq!(agent1.change_id, Some("abc123".to_string()));
+
+        let agent2 = agents.iter().find(|a| a.id == "agent-002").unwrap();
+        assert_eq!(agent2.phase, 2);
+        assert_eq!(agent2.status, AgentStatus::Completed);
+        assert_eq!(agent2.progress, 1.0); // Completed agents have 100% progress
     }
 }
