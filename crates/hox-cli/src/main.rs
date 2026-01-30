@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hox_agent::{BackpressureResult, ExternalLoopState, LoopConfig, Model};
-use hox_core::{HandoffContext, OrchestratorId, Task};
+use hox_core::{DelegationStrategy, HandoffContext, OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
 use hox_jj::{JjCommand, JjExecutor, MetadataManager, RevsetQueries};
 use hox_orchestrator::{
@@ -69,6 +69,10 @@ enum Commands {
         /// Maximum agents per orchestrator
         #[arg(long, default_value = "4")]
         max_agents: usize,
+
+        /// Enable hierarchical delegation (spawn child orchestrators for epics)
+        #[arg(long)]
+        delegate: bool,
     },
 
     /// Show orchestration status
@@ -259,7 +263,8 @@ async fn main() -> Result<()> {
             plan,
             orchestrators,
             max_agents,
-        } => cmd_orchestrate(plan, orchestrators, max_agents).await,
+            delegate,
+        } => cmd_orchestrate(plan, orchestrators, max_agents, delegate).await,
         Commands::Status => cmd_status().await,
         Commands::Patterns { action } => cmd_patterns(action).await,
         Commands::Validate { change, validators } => cmd_validate(change, validators).await,
@@ -381,15 +386,19 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     Ok(())
 }
 
-async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: usize) -> Result<()> {
+async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: usize, delegate: bool) -> Result<()> {
     info!("Starting orchestration: {}", plan);
 
     let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
 
     for i in 0..orchestrator_count {
         let id = OrchestratorId::new('A', (i + 1) as u32);
-        let config = OrchestratorConfig::new(id.clone(), jj.repo_root())
+        let mut config = OrchestratorConfig::new(id.clone(), jj.repo_root())
             .with_max_agents(max_agents);
+
+        if delegate {
+            config = config.with_delegation_strategy(DelegationStrategy::PhasePerChild);
+        }
 
         let mut orchestrator = Orchestrator::with_executor(config, jj.clone()).await?;
 
@@ -401,11 +410,21 @@ async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: us
 
         // Initialize and run
         orchestrator.initialize().await?;
-        println!("Started orchestrator {}", id);
+
+        if delegate {
+            println!("Started orchestrator {} with hierarchical delegation", id);
+            orchestrator.run_with_delegation().await?;
+        } else {
+            println!("Started orchestrator {}", id);
+        }
     }
 
-    println!("Orchestration started with {} orchestrator(s)", orchestrator_count);
-    println!("Use 'hox status' to check progress");
+    println!("Orchestration {} with {} orchestrator(s)",
+        if delegate { "completed" } else { "started" },
+        orchestrator_count);
+    if !delegate {
+        println!("Use 'hox status' to check progress");
+    }
 
     Ok(())
 }

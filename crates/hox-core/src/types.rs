@@ -1,5 +1,7 @@
 //! Core type definitions for Hox orchestration
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -450,6 +452,82 @@ impl Phase {
             tasks: Vec::new(),
         }
     }
+}
+
+// ============================================================================
+// Hierarchical Orchestrator Delegation Types
+// ============================================================================
+
+/// Status of a child orchestrator
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildStatus {
+    /// Being initialized
+    Spawning,
+    /// Actively running
+    Running,
+    /// Completed successfully
+    Completed,
+    /// Failed with error
+    Failed(String),
+}
+
+/// Handle to a child orchestrator
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildHandle {
+    /// Child orchestrator ID
+    pub id: OrchestratorId,
+    /// Which phase this child owns
+    pub phase_assignment: u32,
+    /// Path to child's JJ workspace
+    pub workspace_path: PathBuf,
+    /// Current status
+    pub status: ChildStatus,
+}
+
+/// Strategy for distributing work to child orchestrators
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum DelegationStrategy {
+    /// Each non-blocking phase gets a child orchestrator
+    PhasePerChild,
+    /// Group phases by complexity
+    ComplexityBased { max_stories_per_child: usize },
+    /// No delegation - handle everything locally
+    #[default]
+    None,
+}
+
+/// Plan for how to handle a specific phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DelegationPlan {
+    /// Handle at this orchestrator level
+    Local { phase: u32 },
+    /// Delegate to a child orchestrator
+    ToChild { phase: u32 },
+}
+
+/// Messages between orchestrator levels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OrchestratorMessage {
+    /// Parent -> Child: Assignment
+    Assignment {
+        phase: Phase,
+        tasks: Vec<String>, // Task descriptions
+    },
+    /// Child -> Parent: Status update
+    StatusUpdate {
+        child_id: OrchestratorId,
+        phase: u32,
+        status: ChildStatus,
+        completed_tasks: Vec<ChangeId>,
+    },
+    /// Child -> Parent: Escalation
+    Escalation {
+        child_id: OrchestratorId,
+        issue: String,
+        context: HandoffContext,
+    },
+    /// Parent -> Child: Shutdown
+    Terminate,
 }
 
 #[cfg(test)]
