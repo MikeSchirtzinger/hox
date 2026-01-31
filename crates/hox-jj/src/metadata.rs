@@ -10,7 +10,12 @@ use std::sync::LazyLock;
 
 use crate::command::JjExecutor;
 
-/// Regex patterns for parsing metadata from descriptions
+/// Regex patterns for parsing metadata from descriptions.
+///
+/// SAFETY: All patterns are hardcoded string literals validated by unit tests.
+/// `unwrap()` is acceptable here because `LazyLock` evaluates once and the
+/// patterns cannot fail compilation — they use only basic regex features
+/// (`(?i)`, `^`, `\s*`, `\w+`, `.+`).
 static PRIORITY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^Priority:\s*(\w+)").unwrap());
 static STATUS_RE: LazyLock<Regex> =

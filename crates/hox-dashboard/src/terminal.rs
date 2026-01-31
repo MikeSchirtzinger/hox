@@ -2,7 +2,8 @@
 //!
 //! Handles entering/exiting raw mode and alternate screen.
 
-use crate::{DashboardError, Result};
+use crate::Result;
+use hox_core::HoxError;
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -20,19 +21,19 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub fn init() -> Result<Tui> {
     // Enter raw mode to capture key events
     enable_raw_mode().map_err(|e| {
-        DashboardError::TerminalInit(format!("Failed to enable raw mode: {}", e))
+        HoxError::Dashboard(format!("Failed to enable raw mode: {}", e))
     })?;
 
     // Enter alternate screen to preserve terminal content
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(|e| {
-        DashboardError::TerminalInit(format!("Failed to enter alternate screen: {}", e))
+        HoxError::Dashboard(format!("Failed to enter alternate screen: {}", e))
     })?;
 
     // Create terminal with crossterm backend
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).map_err(|e| {
-        DashboardError::TerminalInit(format!("Failed to create terminal: {}", e))
+        HoxError::Dashboard(format!("Failed to create terminal: {}", e))
     })?;
 
     Ok(terminal)
@@ -42,12 +43,12 @@ pub fn init() -> Result<Tui> {
 pub fn restore() -> Result<()> {
     // Leave alternate screen
     execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| {
-        DashboardError::TerminalInit(format!("Failed to leave alternate screen: {}", e))
+        HoxError::Dashboard(format!("Failed to leave alternate screen: {}", e))
     })?;
 
     // Disable raw mode
     disable_raw_mode().map_err(|e| {
-        DashboardError::TerminalInit(format!("Failed to disable raw mode: {}", e))
+        HoxError::Dashboard(format!("Failed to disable raw mode: {}", e))
     })?;
 
     Ok(())

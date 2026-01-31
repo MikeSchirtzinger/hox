@@ -64,6 +64,14 @@ pub enum HoxError {
     #[error("Pattern error: {0}")]
     Pattern(String),
 
+    // Dashboard errors
+    #[error("Dashboard error: {0}")]
+    Dashboard(String),
+
+    // Browser errors
+    #[error("Browser error: {0}")]
+    Browser(String),
+
     // API errors
     #[error("Authentication error: {0}")]
     Auth(String),

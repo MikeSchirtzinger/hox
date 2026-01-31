@@ -194,7 +194,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DashboardState;
 
     #[test]
     fn test_ui_layout_creation() {

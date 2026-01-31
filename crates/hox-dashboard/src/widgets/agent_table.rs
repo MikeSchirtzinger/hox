@@ -92,10 +92,11 @@ impl AgentTableWidget {
 
     /// Truncate text to fit width
     fn truncate_text(text: &str, max_len: usize) -> String {
-        if text.len() <= max_len {
+        if text.chars().count() <= max_len {
             text.to_string()
         } else {
-            format!("{}…", &text[..max_len.saturating_sub(1)])
+            let truncated: String = text.chars().take(max_len.saturating_sub(1)).collect();
+            format!("{truncated}…")
         }
     }
 

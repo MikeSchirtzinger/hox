@@ -25,9 +25,10 @@
 //! - `Hox-Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
-    AgentNode, AgentStatus, DashboardConfig, DashboardState, DashboardError, GlobalMetrics,
+    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics,
     JjOpType, JjOplogEntry, OrchestrationSession, PhaseProgress, PhaseStatus, Result,
 };
+use hox_core::HoxError;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use tokio::process::Command;
@@ -149,18 +150,18 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
         ])
         .output()
         .await
-        .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "jj op log failed: {}",
             stderr
         )));
     }
 
     let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| DashboardError::JjOplog(format!("Invalid UTF-8 in oplog: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in oplog: {}", e)))?;
     let mut entries = Vec::new();
 
     for line in stdout.lines() {
@@ -203,18 +204,18 @@ pub async fn fetch_commits_with_trailers(limit: usize) -> Result<Vec<CommitWithT
         ])
         .output()
         .await
-        .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj log: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj log: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "jj log failed: {}",
             stderr
         )));
     }
 
     let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| DashboardError::JjOplog(format!("Invalid UTF-8 in jj log: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in jj log: {}", e)))?;
 
     let mut commits = Vec::new();
 
@@ -345,7 +346,7 @@ fn parse_status(s: &str) -> AgentStatus {
 fn parse_oplog_line(line: &str) -> Result<JjOplogEntry> {
     let parts: Vec<&str> = line.split('|').collect();
     if parts.len() < 3 {
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "Invalid oplog line format: {}",
             line
         )));
@@ -361,7 +362,7 @@ fn parse_oplog_line(line: &str) -> Result<JjOplogEntry> {
         "%Y-%m-%d %H:%M:%S %z",
     )
     .map_err(|e| {
-        DashboardError::JjOplog(format!("Failed to parse timestamp '{}': {}", timestamp_str, e))
+        HoxError::JjCommand(format!("Failed to parse timestamp '{}': {}", timestamp_str, e))
     })?
     .with_timezone(&Utc);
 
