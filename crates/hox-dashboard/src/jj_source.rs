@@ -12,17 +12,17 @@
 //!
 //! Working on the authentication module.
 //!
-//! Hox-Agent: agent-abc123
-//! Hox-Phase: 1
-//! Hox-Task: Implement OAuth2 flow
-//! Hox-Status: running
+//! Agent: agent-abc123
+//! Phase: 1
+//! Task: Implement OAuth2 flow
+//! Status: running
 //! ```
 //!
 //! Supported trailers:
-//! - `Hox-Agent`: Agent identifier (required for agent tracking)
-//! - `Hox-Phase`: Phase number (integer)
-//! - `Hox-Task`: Task description
-//! - `Hox-Status`: Status (pending, running, completed, failed, blocked)
+//! - `Agent`: Agent identifier (required for agent tracking)
+//! - `Phase`: Phase number (integer)
+//! - `Task`: Task description
+//! - `Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
     AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics,
@@ -36,15 +36,15 @@ use tokio::process::Command;
 /// Standard Hox trailer keys
 pub mod trailers {
     /// Agent identifier trailer key
-    pub const AGENT: &str = "Hox-Agent";
+    pub const AGENT: &str = "Agent";
     /// Phase number trailer key
-    pub const PHASE: &str = "Hox-Phase";
+    pub const PHASE: &str = "Phase";
     /// Task description trailer key
-    pub const TASK: &str = "Hox-Task";
+    pub const TASK: &str = "Task";
     /// Status trailer key
-    pub const STATUS: &str = "Hox-Status";
+    pub const STATUS: &str = "Status";
     /// Change ID trailer key (for linking to jj changes)
-    pub const CHANGE_ID: &str = "Hox-Change";
+    pub const CHANGE_ID: &str = "Change";
 }
 
 /// Parsed commit with trailer metadata
@@ -729,13 +729,13 @@ mod tests {
 
     #[test]
     fn test_parse_commit_with_trailers() {
-        let line = "abc123|Implement feature X|Hox-Agent=agent-xyz,Hox-Phase=2,Hox-Task=OAuth flow";
+        let line = "abc123|Implement feature X|Agent=agent-xyz,Phase=2,Task=OAuth flow";
         let commit = parse_commit_with_trailers(line).expect("Failed to parse");
         assert_eq!(commit.change_id, "abc123");
         assert_eq!(commit.description, "Implement feature X");
-        assert_eq!(commit.trailers.get("Hox-Agent"), Some(&"agent-xyz".to_string()));
-        assert_eq!(commit.trailers.get("Hox-Phase"), Some(&"2".to_string()));
-        assert_eq!(commit.trailers.get("Hox-Task"), Some(&"OAuth flow".to_string()));
+        assert_eq!(commit.trailers.get("Agent"), Some(&"agent-xyz".to_string()));
+        assert_eq!(commit.trailers.get("Phase"), Some(&"2".to_string()));
+        assert_eq!(commit.trailers.get("Task"), Some(&"OAuth flow".to_string()));
     }
 
     #[test]

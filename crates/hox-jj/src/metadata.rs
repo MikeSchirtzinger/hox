@@ -1,33 +1,34 @@
 //! Hox metadata management for JJ changes
 //!
 //! This module provides helpers for reading and writing Hox metadata
-//! on JJ changes. Until jj-dev is complete, metadata is stored
-//! in structured description text.
+//! on JJ changes using JJ trailers. Trailers are key-value pairs at the
+//! end of commit descriptions in the format `Key: value`.
 
 use hox_core::{ChangeId, HoxMetadata, MessageType, Priority, Result, TaskStatus};
-use regex::Regex;
-use std::sync::LazyLock;
 
 use crate::command::JjExecutor;
 
-/// Regex patterns for parsing metadata from descriptions.
-///
-/// SAFETY: All patterns are hardcoded string literals validated by unit tests.
-/// `unwrap()` is acceptable here because `LazyLock` evaluates once and the
-/// patterns cannot fail compilation — they use only basic regex features
-/// (`(?i)`, `^`, `\s*`, `\w+`, `.+`).
-static PRIORITY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Priority:\s*(\w+)").unwrap());
-static STATUS_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Status:\s*(\w+)").unwrap());
-static AGENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Agent:\s*(.+)").unwrap());
-static ORCHESTRATOR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Orchestrator:\s*(.+)").unwrap());
-static MSG_TO_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Msg-To:\s*(.+)").unwrap());
-static MSG_TYPE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Msg-Type:\s*(\w+)").unwrap());
+/// Standard Hox trailer keys (without prefix)
+pub mod trailers {
+    /// Agent identifier trailer key
+    pub const AGENT: &str = "Agent";
+    /// Status trailer key
+    pub const STATUS: &str = "Status";
+    /// Priority trailer key
+    pub const PRIORITY: &str = "Priority";
+    /// Orchestrator identifier trailer key
+    pub const ORCHESTRATOR: &str = "Orchestrator";
+    /// Message recipient trailer key
+    pub const MSG_TO: &str = "Msg-To";
+    /// Message type trailer key
+    pub const MSG_TYPE: &str = "Msg-Type";
+    /// Phase number trailer key
+    pub const PHASE: &str = "Phase";
+    /// Task description trailer key
+    pub const TASK: &str = "Task";
+    /// Change ID trailer key
+    pub const CHANGE: &str = "Change";
+}
 
 /// Manager for Hox metadata operations
 pub struct MetadataManager<E: JjExecutor> {
@@ -46,33 +47,37 @@ impl<E: JjExecutor> MetadataManager<E> {
         for line in description.lines() {
             let line = line.trim();
 
-            if let Some(caps) = PRIORITY_RE.captures(line) {
-                if let Ok(p) = caps[1].parse::<Priority>() {
-                    metadata.priority = Some(p);
-                }
-            }
+            // Split on first colon to separate key from value
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim();
 
-            if let Some(caps) = STATUS_RE.captures(line) {
-                if let Ok(s) = caps[1].parse::<TaskStatus>() {
-                    metadata.status = Some(s);
-                }
-            }
-
-            if let Some(caps) = AGENT_RE.captures(line) {
-                metadata.agent = Some(caps[1].trim().to_string());
-            }
-
-            if let Some(caps) = ORCHESTRATOR_RE.captures(line) {
-                metadata.orchestrator = Some(caps[1].trim().to_string());
-            }
-
-            if let Some(caps) = MSG_TO_RE.captures(line) {
-                metadata.msg_to = Some(caps[1].trim().to_string());
-            }
-
-            if let Some(caps) = MSG_TYPE_RE.captures(line) {
-                if let Ok(t) = caps[1].parse::<MessageType>() {
-                    metadata.msg_type = Some(t);
+                match key {
+                    trailers::PRIORITY => {
+                        if let Ok(p) = value.parse::<Priority>() {
+                            metadata.priority = Some(p);
+                        }
+                    }
+                    trailers::STATUS => {
+                        if let Ok(s) = value.parse::<TaskStatus>() {
+                            metadata.status = Some(s);
+                        }
+                    }
+                    trailers::AGENT => {
+                        metadata.agent = Some(value.to_string());
+                    }
+                    trailers::ORCHESTRATOR => {
+                        metadata.orchestrator = Some(value.to_string());
+                    }
+                    trailers::MSG_TO => {
+                        metadata.msg_to = Some(value.to_string());
+                    }
+                    trailers::MSG_TYPE => {
+                        if let Ok(t) = value.parse::<MessageType>() {
+                            metadata.msg_type = Some(t);
+                        }
+                    }
+                    _ => {} // Ignore other trailers
                 }
             }
         }
@@ -85,27 +90,27 @@ impl<E: JjExecutor> MetadataManager<E> {
         let mut lines = Vec::new();
 
         if let Some(priority) = &metadata.priority {
-            lines.push(format!("Priority: {}", priority));
+            lines.push(format!("{}: {}", trailers::PRIORITY, priority));
         }
 
         if let Some(status) = &metadata.status {
-            lines.push(format!("Status: {}", status));
+            lines.push(format!("{}: {}", trailers::STATUS, status));
         }
 
         if let Some(agent) = &metadata.agent {
-            lines.push(format!("Agent: {}", agent));
+            lines.push(format!("{}: {}", trailers::AGENT, agent));
         }
 
         if let Some(orchestrator) = &metadata.orchestrator {
-            lines.push(format!("Orchestrator: {}", orchestrator));
+            lines.push(format!("{}: {}", trailers::ORCHESTRATOR, orchestrator));
         }
 
         if let Some(msg_to) = &metadata.msg_to {
-            lines.push(format!("Msg-To: {}", msg_to));
+            lines.push(format!("{}: {}", trailers::MSG_TO, msg_to));
         }
 
         if let Some(msg_type) = &metadata.msg_type {
-            lines.push(format!("Msg-Type: {}", msg_type));
+            lines.push(format!("{}: {}", trailers::MSG_TYPE, msg_type));
         }
 
         lines.join("\n")
@@ -123,8 +128,7 @@ impl<E: JjExecutor> MetadataManager<E> {
 
     /// Set metadata on a change using jj describe
     ///
-    /// Note: This updates the change description to include metadata.
-    /// When jj-dev is complete, this will use --set-priority etc.
+    /// Note: This updates the change description to include metadata trailers.
     pub async fn set(&self, change_id: &ChangeId, metadata: &HoxMetadata) -> Result<()> {
         // First read existing description
         let output = self
@@ -134,17 +138,18 @@ impl<E: JjExecutor> MetadataManager<E> {
 
         let existing = output.stdout.trim();
 
-        // Remove existing metadata lines
+        // Remove existing metadata trailer lines
         let cleaned: Vec<&str> = existing
             .lines()
             .filter(|line| {
                 let line = line.trim();
-                !PRIORITY_RE.is_match(line)
-                    && !STATUS_RE.is_match(line)
-                    && !AGENT_RE.is_match(line)
-                    && !ORCHESTRATOR_RE.is_match(line)
-                    && !MSG_TO_RE.is_match(line)
-                    && !MSG_TYPE_RE.is_match(line)
+                // Check if line starts with any of our trailer keys followed by ':'
+                !line.starts_with(&format!("{}:", trailers::PRIORITY))
+                    && !line.starts_with(&format!("{}:", trailers::STATUS))
+                    && !line.starts_with(&format!("{}:", trailers::AGENT))
+                    && !line.starts_with(&format!("{}:", trailers::ORCHESTRATOR))
+                    && !line.starts_with(&format!("{}:", trailers::MSG_TO))
+                    && !line.starts_with(&format!("{}:", trailers::MSG_TYPE))
             })
             .collect();
 
