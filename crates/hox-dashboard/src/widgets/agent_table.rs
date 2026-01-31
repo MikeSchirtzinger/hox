@@ -2,6 +2,7 @@
 //!
 //! Displays a table of active agents with their progress and status.
 
+use super::status_color_from_name;
 use crate::{AgentNode, DashboardState};
 use ratatui::{
     prelude::*,
@@ -78,7 +79,7 @@ impl AgentTableWidget {
         let status = agent.status.indicator();
         let duration = Self::format_duration(agent.duration_ms);
 
-        let status_color = Self::status_to_color(agent.status.color_name());
+        let status_color = status_color_from_name(agent.status.color_name());
 
         Row::new(vec![
             Cell::from(agent_name).style(Style::default().fg(Color::White)),
@@ -122,17 +123,6 @@ impl AgentTableWidget {
         }
     }
 
-    /// Convert color name string to ratatui Color
-    fn status_to_color(color_name: &str) -> Color {
-        match color_name {
-            "gray" => Color::DarkGray,
-            "yellow" => Color::Yellow,
-            "green" => Color::Green,
-            "red" => Color::Red,
-            "magenta" => Color::Magenta,
-            _ => Color::White,
-        }
-    }
 
     /// Render with detailed view (more columns)
     pub fn render_detailed(state: &DashboardState, area: Rect, buf: &mut Buffer) {
@@ -207,7 +197,7 @@ impl AgentTableWidget {
         let calls = agent.tool_calls.to_string();
         let success = format!("{:.0}%", agent.success_rate * 100.0);
 
-        let status_color = Self::status_to_color(agent.status.color_name());
+        let status_color = status_color_from_name(agent.status.color_name());
         let success_color = if agent.success_rate >= 0.9 {
             Color::Green
         } else if agent.success_rate >= 0.7 {
