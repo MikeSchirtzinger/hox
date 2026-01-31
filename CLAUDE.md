@@ -35,6 +35,10 @@ RUST_LOG=debug cargo test -- --nocapture
 | `hox-core` | Core types: `Task`, `TaskStatus`, `Priority`, `HoxError`, `AgentId` |
 | `hox-jj` | JJ integration: metadata parsing, revsets, workspace management |
 | `hox-orchestrator` | Orchestration: agent spawning, communication, handoffs |
+| `hox-agent` | Agent runtime: circuit breaker, promises, file execution, artifacts |
+| `hox-browser` | Browser automation: CDP sessions, screenshots, verification |
+| `hox-dashboard` | Ratatui-based observability TUI for orchestration monitoring |
+| `hox-planning` | PRD generation, task decomposition, plan templates |
 | `hox-validation` | Plan validation and constraint checking |
 | `hox-metrics` | Metrics collection and reporting |
 | `hox-evolution` | Plan evolution and refinement |

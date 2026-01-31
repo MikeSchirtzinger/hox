@@ -96,13 +96,12 @@ impl JjExecutor for JjCommand {
 }
 
 /// Mock JJ executor for testing
-#[cfg(test)]
+#[derive(Clone)]
 pub struct MockJjExecutor {
     repo_root: PathBuf,
     responses: std::collections::HashMap<String, JjOutput>,
 }
 
-#[cfg(test)]
 impl MockJjExecutor {
     pub fn new() -> Self {
         Self {
@@ -117,7 +116,6 @@ impl MockJjExecutor {
     }
 }
 
-#[cfg(test)]
 #[async_trait]
 impl JjExecutor for MockJjExecutor {
     async fn exec(&self, args: &[&str]) -> Result<JjOutput> {

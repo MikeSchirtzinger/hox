@@ -53,7 +53,9 @@ impl<E: JjExecutor> WorkspaceManager<E> {
                 "add",
                 "--name",
                 name,
-                workspace_path.to_str().unwrap(),
+                workspace_path.to_str().ok_or_else(|| {
+                    HoxError::JjWorkspace("workspace path contains non-UTF-8 characters".into())
+                })?,
             ])
             .await?;
 

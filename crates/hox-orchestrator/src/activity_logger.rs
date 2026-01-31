@@ -111,8 +111,9 @@ impl ActivityLogger {
         }
 
         // Agent output (truncated to first 500 chars)
-        let output_preview = if agent_output.len() > 500 {
-            format!("{}...", &agent_output[..500])
+        let output_preview = if agent_output.chars().count() > 500 {
+            let truncated: String = agent_output.chars().take(500).collect();
+            format!("{truncated}...")
         } else {
             agent_output.to_string()
         };

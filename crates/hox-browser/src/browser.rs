@@ -1,6 +1,7 @@
 //! Browser lifecycle management using Chrome DevTools Protocol
 
-use crate::error::{BrowserError, Result};
+use crate::error::Result;
+use hox_core::HoxError;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -73,7 +74,7 @@ impl BrowserSession {
             .headless(config.headless)
             .window_size(Some((config.window_width, config.window_height)))
             .build()
-            .map_err(|e| BrowserError::LaunchFailed(e.to_string()))?;
+            .map_err(|e| HoxError::Browser(format!("Failed to launch browser: {}", e)))?;
 
         // Add user agent if specified
         let user_agent_arg: Option<String> = config.user_agent.as_ref().map(|ua| format!("--user-agent={}", ua));
@@ -83,12 +84,12 @@ impl BrowserSession {
 
         // Launch browser
         let browser = Browser::new(launch_options)
-            .map_err(|e| BrowserError::LaunchFailed(e.to_string()))?;
+            .map_err(|e| HoxError::Browser(format!("Failed to launch browser: {}", e)))?;
 
         // Get initial tab
         let tab = browser
             .new_tab()
-            .map_err(|e| BrowserError::LaunchFailed(format!("Failed to create tab: {}", e)))?;
+            .map_err(|e| HoxError::Browser(format!("Failed to create tab: {}", e)))?;
 
         info!("Browser launched successfully");
 
@@ -107,11 +108,11 @@ impl BrowserSession {
         info!("Connecting to existing browser on port {}", port);
 
         let browser = Browser::connect(format!("http://127.0.0.1:{}", port))
-            .map_err(|e| BrowserError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| HoxError::Browser(format!("Failed to connect to browser: {}", e)))?;
 
         let tab = browser
             .new_tab()
-            .map_err(|e| BrowserError::ConnectionFailed(format!("Failed to create tab: {}", e)))?;
+            .map_err(|e| HoxError::Browser(format!("Failed to create tab: {}", e)))?;
 
         info!("Connected to browser successfully");
 
@@ -131,18 +132,12 @@ impl BrowserSession {
 
         self.tab
             .navigate_to(url)
-            .map_err(|e| BrowserError::NavigationFailed {
-                url: url.to_string(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| HoxError::Browser(format!("Failed to navigate to {}: {}", url, e)))?;
 
         // Wait for navigation to complete
         self.tab
             .wait_until_navigated()
-            .map_err(|e| BrowserError::NavigationFailed {
-                url: url.to_string(),
-                reason: format!("Navigation timeout: {}", e),
-            })?;
+            .map_err(|e| HoxError::Browser(format!("Navigation timeout for {}: {}", url, e)))?;
 
         info!("Successfully navigated to {}", url);
         Ok(())
@@ -160,9 +155,7 @@ impl BrowserSession {
 
         self.tab
             .wait_for_element_with_custom_timeout(selector, timeout_duration)
-            .map_err(|_e| BrowserError::ElementNotFound {
-                selector: selector.to_string(),
-            })?;
+            .map_err(|_e| HoxError::Browser(format!("Element not found: {}", selector)))?;
 
         debug!("Element found: {}", selector);
         Ok(())
@@ -181,7 +174,7 @@ impl BrowserSession {
         let result = self
             .tab
             .evaluate(script, false)
-            .map_err(|e| BrowserError::JavaScriptError(e.to_string()))?;
+            .map_err(|e| HoxError::Browser(format!("JavaScript evaluation failed: {}", e)))?;
 
         Ok(result.value.unwrap_or(serde_json::Value::Null))
     }

@@ -1,7 +1,8 @@
 //! Screenshot capture using Chrome DevTools Protocol
 
 use crate::browser::BrowserSession;
-use crate::error::{BrowserError, Result};
+use crate::error::Result;
+use hox_core::HoxError;
 use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
 use hox_agent::{ArtifactManager, ArtifactType, ValidationArtifact};
 use tracing::{debug, info};
@@ -114,7 +115,7 @@ pub async fn capture_screenshot(
     let artifact: ValidationArtifact = artifact_manager
         .store_artifact(change_id, ArtifactType::Screenshot, &screenshot_data, &description)
         .await
-        .map_err(|e| BrowserError::ScreenshotFailed(format!("Failed to store artifact: {}", e)))?;
+        .map_err(|e| HoxError::Browser(format!("Failed to store artifact: {}", e)))?;
 
     info!(
         "Screenshot stored: {} ({} bytes)",
@@ -131,7 +132,7 @@ async fn capture_full_page_screenshot(session: &BrowserSession, full_page: bool)
 
     let screenshot_data = tab
         .capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, full_page)
-        .map_err(|e| BrowserError::ScreenshotFailed(format!("CDP capture failed: {}", e)))?;
+        .map_err(|e| HoxError::Browser(format!("CDP capture failed: {}", e)))?;
 
     Ok(screenshot_data)
 }
@@ -143,13 +144,11 @@ async fn capture_element_screenshot(session: &BrowserSession, selector: &str) ->
     // Wait for element to be available
     let element = tab
         .wait_for_element(selector)
-        .map_err(|_e| BrowserError::ElementNotFound {
-            selector: selector.to_string(),
-        })?;
+        .map_err(|_e| HoxError::Browser(format!("Element not found: {}", selector)))?;
 
     let screenshot_data = element
         .capture_screenshot(CaptureScreenshotFormatOption::Png)
-        .map_err(|e| BrowserError::ScreenshotFailed(format!("Element capture failed: {}", e)))?;
+        .map_err(|e| HoxError::Browser(format!("Element capture failed: {}", e)))?;
 
     Ok(screenshot_data)
 }

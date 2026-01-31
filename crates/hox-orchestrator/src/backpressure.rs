@@ -5,6 +5,7 @@
 
 use hox_agent::BackpressureResult;
 use hox_core::Result;
+use hox_jj::JjExecutor;
 use std::path::Path;
 use std::process::Command;
 
@@ -177,6 +178,93 @@ fn run_command(workspace_path: &Path, program: &str, args: &[&str]) -> CheckResu
     }
 }
 
+/// Result from running jj fix
+#[derive(Debug, Clone)]
+pub struct FixResult {
+    pub success: bool,
+    pub output: String,
+}
+
+/// Run jj fix to auto-format all mutable commits
+///
+/// This runs `jj fix` to automatically format code according to configured
+/// formatters (e.g., rustfmt). This eliminates formatting-only conflicts
+/// between agents working in parallel.
+///
+/// Runs `jj fix -s <change_id>` if a change_id is provided, otherwise
+/// runs `jj fix` on all mutable changes.
+///
+/// # Arguments
+///
+/// * `executor` - JJ command executor
+/// * `change_id` - Optional change ID to fix (if None, fixes all mutable changes)
+///
+/// # Returns
+///
+/// FixResult containing success status and output
+pub async fn run_jj_fix<E: JjExecutor>(executor: &E, change_id: Option<&str>) -> Result<FixResult> {
+    let args = match change_id {
+        Some(id) => vec!["fix", "-s", id],
+        None => vec!["fix"],
+    };
+
+    tracing::debug!("Running jj fix: {:?}", args);
+    let output = executor.exec(&args).await?;
+
+    Ok(FixResult {
+        success: output.success,
+        output: if output.success {
+            output.stdout
+        } else {
+            output.stderr
+        },
+    })
+}
+
+/// Enhanced backpressure that includes jj fix before standard checks
+///
+/// This function runs `jj fix` first to auto-format code, then runs
+/// the standard backpressure checks (tests, lints, builds). This prevents
+/// formatting-only conflicts from causing check failures.
+///
+/// Note: jj fix failures are NON-FATAL. If fix fails, we log a warning
+/// and continue with standard checks. This ensures backpressure always
+/// runs even if fix is misconfigured.
+///
+/// # Arguments
+///
+/// * `workspace_path` - Path to workspace for running checks
+/// * `executor` - JJ command executor for running jj fix
+/// * `change_id` - Optional change ID to fix (if None, fixes all mutable changes)
+///
+/// # Returns
+///
+/// BackpressureResult with all check results
+pub async fn run_all_checks_with_fix<E: JjExecutor>(
+    workspace_path: &Path,
+    executor: &E,
+    change_id: Option<&str>,
+) -> Result<BackpressureResult> {
+    // Run jj fix FIRST to clean formatting
+    let fix_result = run_jj_fix(executor, change_id).await;
+
+    match &fix_result {
+        Ok(result) => {
+            if result.success {
+                tracing::debug!("jj fix completed successfully");
+            } else {
+                tracing::warn!("jj fix failed (non-fatal): {}", result.output);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("jj fix failed (non-fatal): {}", e);
+        }
+    }
+
+    // Then run standard checks
+    run_all_checks(workspace_path)
+}
+
 /// Format backpressure errors for inclusion in agent prompt
 pub fn format_errors_for_prompt(result: &BackpressureResult) -> String {
     if result.errors.is_empty() {
@@ -198,6 +286,7 @@ pub fn format_errors_for_prompt(result: &BackpressureResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hox_jj::{JjOutput, MockJjExecutor};
     use tempfile::TempDir;
 
     #[test]
@@ -230,6 +319,102 @@ mod tests {
         let result = run_all_checks(temp_dir.path()).unwrap();
 
         // All should pass (no project detected = skip)
+        assert!(result.tests_passed);
+        assert!(result.lints_passed);
+        assert!(result.builds_passed);
+    }
+
+    #[tokio::test]
+    async fn test_run_jj_fix_success() {
+        let executor = MockJjExecutor::new().with_response(
+            "fix",
+            JjOutput {
+                stdout: "Fixed 3 files".to_string(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let result = run_jj_fix(&executor, None).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "Fixed 3 files");
+    }
+
+    #[tokio::test]
+    async fn test_run_jj_fix_with_change_id() {
+        let executor = MockJjExecutor::new().with_response(
+            "fix -s abc123",
+            JjOutput {
+                stdout: "Fixed change abc123".to_string(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let result = run_jj_fix(&executor, Some("abc123")).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "Fixed change abc123");
+    }
+
+    #[tokio::test]
+    async fn test_run_jj_fix_failure_is_non_fatal() {
+        let executor = MockJjExecutor::new().with_response(
+            "fix",
+            JjOutput {
+                stdout: String::new(),
+                stderr: "jj fix not configured".to_string(),
+                success: false,
+            },
+        );
+
+        let result = run_jj_fix(&executor, None).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.output, "jj fix not configured");
+    }
+
+    #[tokio::test]
+    async fn test_run_all_checks_with_fix() {
+        let executor = MockJjExecutor::new().with_response(
+            "fix",
+            JjOutput {
+                stdout: "Fixed files".to_string(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Should run fix first, then standard checks
+        let result = run_all_checks_with_fix(temp_dir.path(), &executor, None)
+            .await
+            .unwrap();
+
+        // Standard checks should pass (no project detected)
+        assert!(result.tests_passed);
+        assert!(result.lints_passed);
+        assert!(result.builds_passed);
+    }
+
+    #[tokio::test]
+    async fn test_run_all_checks_with_fix_continues_on_fix_failure() {
+        let executor = MockJjExecutor::new().with_response(
+            "fix",
+            JjOutput {
+                stdout: String::new(),
+                stderr: "fix failed".to_string(),
+                success: false,
+            },
+        );
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Should continue with standard checks even if fix fails
+        let result = run_all_checks_with_fix(temp_dir.path(), &executor, None)
+            .await
+            .unwrap();
+
+        // Standard checks should still run and pass
         assert!(result.tests_passed);
         assert!(result.lints_passed);
         assert!(result.builds_passed);

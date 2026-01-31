@@ -1,6 +1,6 @@
 //! JJ Operation Log watcher for detecting changes
 
-use hox_core::Result;
+use hox_core::{HoxError, Result};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -177,6 +177,158 @@ impl<E: JjExecutor + 'static> OpLogWatcher<E> {
     }
 }
 
+/// Operation information from JJ oplog
+#[derive(Debug, Clone)]
+pub struct OperationInfo {
+    pub id: String,
+    pub description: String,
+    pub timestamp: String,
+}
+
+/// Manager for JJ operation log manipulation
+///
+/// This provides rollback and recovery capabilities by manipulating
+/// JJ operations. Unlike OpLogWatcher (which is read-only), OpManager
+/// can perform undo, restore, and snapshot operations.
+pub struct OpManager<E: JjExecutor> {
+    executor: E,
+}
+
+impl<E: JjExecutor> OpManager<E> {
+    pub fn new(executor: E) -> Self {
+        Self { executor }
+    }
+
+    /// Get recent operations from the oplog
+    ///
+    /// Returns the most recent N operations with their IDs, descriptions, and timestamps.
+    pub async fn recent_operations(&self, count: usize) -> Result<Vec<OperationInfo>> {
+        let output = self
+            .executor
+            .exec(&[
+                "op",
+                "log",
+                "-n",
+                &count.to_string(),
+                "-T",
+                "operation_id ++ \"\\t\" ++ description ++ \"\\t\" ++ time ++ \"\\n\"",
+                "--no-graph",
+            ])
+            .await?;
+
+        if !output.success {
+            return Err(HoxError::JjCommand(format!(
+                "Failed to get recent operations: {}",
+                output.stderr
+            )));
+        }
+
+        let mut operations = Vec::new();
+        for line in output.stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() >= 3 {
+                operations.push(OperationInfo {
+                    id: parts[0].to_string(),
+                    description: parts[1].to_string(),
+                    timestamp: parts[2].to_string(),
+                });
+            } else if parts.len() >= 2 {
+                operations.push(OperationInfo {
+                    id: parts[0].to_string(),
+                    description: parts[1].to_string(),
+                    timestamp: String::new(),
+                });
+            }
+        }
+
+        Ok(operations)
+    }
+
+    /// Undo the most recent operation
+    pub async fn undo(&self) -> Result<()> {
+        let output = self.executor.exec(&["undo"]).await?;
+
+        if !output.success {
+            return Err(HoxError::JjCommand(format!(
+                "Failed to undo operation: {}",
+                output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Restore to a specific operation by ID
+    ///
+    /// This makes the given operation the current state, discarding all
+    /// operations that came after it.
+    pub async fn restore(&self, operation_id: &str) -> Result<()> {
+        let output = self
+            .executor
+            .exec(&["op", "restore", operation_id])
+            .await?;
+
+        if !output.success {
+            return Err(HoxError::JjCommand(format!(
+                "Failed to restore to operation {}: {}",
+                operation_id, output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Revert a specific operation by ID (creating inverse operation)
+    ///
+    /// NOTE: `jj op revert` may not exist in all JJ versions.
+    /// This is stubbed for future use when the command becomes available.
+    pub async fn revert(&self, operation_id: &str) -> Result<()> {
+        // TODO: This command may not exist in current JJ versions
+        // When available, it should create an inverse operation instead of discarding history
+        let output = self
+            .executor
+            .exec(&["op", "revert", operation_id])
+            .await?;
+
+        if !output.success {
+            // If command doesn't exist, fall back to restore for now
+            if output.stderr.contains("unrecognized")
+                || output.stderr.contains("unknown")
+                || output.stderr.contains("not a command")
+            {
+                warn!(
+                    "jj op revert not available, falling back to restore for operation {}",
+                    operation_id
+                );
+                return self.restore(operation_id).await;
+            }
+
+            return Err(HoxError::JjCommand(format!(
+                "Failed to revert operation {}: {}",
+                operation_id, output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Take a snapshot of the current operation
+    ///
+    /// Returns the current operation ID which can be used for recovery.
+    pub async fn snapshot(&self) -> Result<String> {
+        let operations = self.recent_operations(1).await?;
+
+        operations
+            .first()
+            .map(|op| op.id.clone())
+            .ok_or_else(|| HoxError::JjCommand("No operations found for snapshot".to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +352,76 @@ mod tests {
             result,
             Some(("abc123".to_string(), "test operation".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn test_recent_operations() {
+        let executor = MockJjExecutor::new().with_response(
+            "op log -n 3 -T operation_id ++ \"\\t\" ++ description ++ \"\\t\" ++ time ++ \"\\n\" --no-graph",
+            JjOutput {
+                stdout: "op3\tdescription 3\t2024-01-01 12:00:00\nop2\tdescription 2\t2024-01-01 11:00:00\nop1\tdescription 1\t2024-01-01 10:00:00\n".to_string(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let manager = OpManager::new(executor);
+        let operations = manager.recent_operations(3).await.unwrap();
+
+        assert_eq!(operations.len(), 3);
+        assert_eq!(operations[0].id, "op3");
+        assert_eq!(operations[0].description, "description 3");
+        assert_eq!(operations[1].id, "op2");
+    }
+
+    #[tokio::test]
+    async fn test_undo() {
+        let executor = MockJjExecutor::new().with_response(
+            "undo",
+            JjOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let manager = OpManager::new(executor);
+        let result = manager.undo().await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_restore() {
+        let executor = MockJjExecutor::new().with_response(
+            "op restore test-op-123",
+            JjOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let manager = OpManager::new(executor);
+        let result = manager.restore("test-op-123").await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot() {
+        let executor = MockJjExecutor::new().with_response(
+            "op log -n 1 -T operation_id ++ \"\\t\" ++ description ++ \"\\t\" ++ time ++ \"\\n\" --no-graph",
+            JjOutput {
+                stdout: "snapshot-123\tcurrent state\t2024-01-01 12:00:00\n".to_string(),
+                stderr: String::new(),
+                success: true,
+            },
+        );
+
+        let manager = OpManager::new(executor);
+        let snapshot = manager.snapshot().await.unwrap();
+
+        assert_eq!(snapshot, "snapshot-123");
     }
 }

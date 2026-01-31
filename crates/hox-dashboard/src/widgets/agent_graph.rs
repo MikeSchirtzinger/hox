@@ -155,8 +155,10 @@ impl AgentGraphWidget {
         );
 
         // Phase name (truncated if needed)
-        let name = if phase.name.len() > area.width.saturating_sub(2) as usize {
-            format!("{}…", &phase.name[..area.width.saturating_sub(3) as usize])
+        let max_chars = area.width.saturating_sub(2) as usize;
+        let name = if phase.name.chars().count() > max_chars {
+            let truncated: String = phase.name.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             phase.name.clone()
         };
@@ -232,6 +234,7 @@ impl AgentGraphWidget {
         let empty = width.saturating_sub(filled);
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     }
+
 }
 
 #[cfg(test)]

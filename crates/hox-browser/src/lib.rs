@@ -84,8 +84,6 @@ pub use verification::{VisualCheck, ElementAttribute, verify_element, verify_ele
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_public_api_availability() {
         // This test just ensures all public APIs are accessible

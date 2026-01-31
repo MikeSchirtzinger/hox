@@ -12,22 +12,23 @@
 //!
 //! Working on the authentication module.
 //!
-//! Hox-Agent: agent-abc123
-//! Hox-Phase: 1
-//! Hox-Task: Implement OAuth2 flow
-//! Hox-Status: running
+//! Agent: agent-abc123
+//! Phase: 1
+//! Task: Implement OAuth2 flow
+//! Status: running
 //! ```
 //!
 //! Supported trailers:
-//! - `Hox-Agent`: Agent identifier (required for agent tracking)
-//! - `Hox-Phase`: Phase number (integer)
-//! - `Hox-Task`: Task description
-//! - `Hox-Status`: Status (pending, running, completed, failed, blocked)
+//! - `Agent`: Agent identifier (required for agent tracking)
+//! - `Phase`: Phase number (integer)
+//! - `Task`: Task description
+//! - `Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
-    AgentNode, AgentStatus, DashboardConfig, DashboardState, DashboardError, GlobalMetrics,
+    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics,
     JjOpType, JjOplogEntry, OrchestrationSession, PhaseProgress, PhaseStatus, Result,
 };
+use hox_core::HoxError;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use tokio::process::Command;
@@ -35,15 +36,15 @@ use tokio::process::Command;
 /// Standard Hox trailer keys
 pub mod trailers {
     /// Agent identifier trailer key
-    pub const AGENT: &str = "Hox-Agent";
+    pub const AGENT: &str = "Agent";
     /// Phase number trailer key
-    pub const PHASE: &str = "Hox-Phase";
+    pub const PHASE: &str = "Phase";
     /// Task description trailer key
-    pub const TASK: &str = "Hox-Task";
+    pub const TASK: &str = "Task";
     /// Status trailer key
-    pub const STATUS: &str = "Hox-Status";
+    pub const STATUS: &str = "Status";
     /// Change ID trailer key (for linking to jj changes)
-    pub const CHANGE_ID: &str = "Hox-Change";
+    pub const CHANGE_ID: &str = "Change";
 }
 
 /// Parsed commit with trailer metadata
@@ -149,18 +150,18 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
         ])
         .output()
         .await
-        .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "jj op log failed: {}",
             stderr
         )));
     }
 
     let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| DashboardError::JjOplog(format!("Invalid UTF-8 in oplog: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in oplog: {}", e)))?;
     let mut entries = Vec::new();
 
     for line in stdout.lines() {
@@ -203,18 +204,18 @@ pub async fn fetch_commits_with_trailers(limit: usize) -> Result<Vec<CommitWithT
         ])
         .output()
         .await
-        .map_err(|e| DashboardError::JjOplog(format!("Failed to execute jj log: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj log: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "jj log failed: {}",
             stderr
         )));
     }
 
     let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| DashboardError::JjOplog(format!("Invalid UTF-8 in jj log: {}", e)))?;
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in jj log: {}", e)))?;
 
     let mut commits = Vec::new();
 
@@ -345,7 +346,7 @@ fn parse_status(s: &str) -> AgentStatus {
 fn parse_oplog_line(line: &str) -> Result<JjOplogEntry> {
     let parts: Vec<&str> = line.split('|').collect();
     if parts.len() < 3 {
-        return Err(DashboardError::JjOplog(format!(
+        return Err(HoxError::JjCommand(format!(
             "Invalid oplog line format: {}",
             line
         )));
@@ -361,7 +362,7 @@ fn parse_oplog_line(line: &str) -> Result<JjOplogEntry> {
         "%Y-%m-%d %H:%M:%S %z",
     )
     .map_err(|e| {
-        DashboardError::JjOplog(format!("Failed to parse timestamp '{}': {}", timestamp_str, e))
+        HoxError::JjCommand(format!("Failed to parse timestamp '{}': {}", timestamp_str, e))
     })?
     .with_timezone(&Utc);
 
@@ -728,13 +729,13 @@ mod tests {
 
     #[test]
     fn test_parse_commit_with_trailers() {
-        let line = "abc123|Implement feature X|Hox-Agent=agent-xyz,Hox-Phase=2,Hox-Task=OAuth flow";
+        let line = "abc123|Implement feature X|Agent=agent-xyz,Phase=2,Task=OAuth flow";
         let commit = parse_commit_with_trailers(line).expect("Failed to parse");
         assert_eq!(commit.change_id, "abc123");
         assert_eq!(commit.description, "Implement feature X");
-        assert_eq!(commit.trailers.get("Hox-Agent"), Some(&"agent-xyz".to_string()));
-        assert_eq!(commit.trailers.get("Hox-Phase"), Some(&"2".to_string()));
-        assert_eq!(commit.trailers.get("Hox-Task"), Some(&"OAuth flow".to_string()));
+        assert_eq!(commit.trailers.get("Agent"), Some(&"agent-xyz".to_string()));
+        assert_eq!(commit.trailers.get("Phase"), Some(&"2".to_string()));
+        assert_eq!(commit.trailers.get("Task"), Some(&"OAuth flow".to_string()));
     }
 
     #[test]

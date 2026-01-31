@@ -60,7 +60,7 @@ impl GlobalMetrics {
         if self.total_tool_calls == 0 {
             return 100.0;
         }
-        let successful = self.total_tool_calls - self.total_failures;
+        let successful = self.total_tool_calls.saturating_sub(self.total_failures);
         (successful as f32 / self.total_tool_calls as f32) * 100.0
     }
 

@@ -56,7 +56,7 @@ If analytics require aggregation across many runs, telemetry can be feature-flag
 
 ---
 
-## 2. First-Class Metadata (JJ Fork Enhancement)
+## 2. First-Class Metadata (jj-dev Enhancement)
 
 ### 2.1 New Fields on Commits
 
@@ -67,12 +67,12 @@ pub struct Commit {
     // ... existing fields ...
 
     // Hox metadata (optional)
-    pub hox_priority: Option<Priority>,
-    pub hox_status: Option<TaskStatus>,
-    pub hox_agent: Option<String>,
-    pub hox_orchestrator: Option<String>,
-    pub hox_msg_to: Option<String>,      // Messaging target (supports wildcards)
-    pub hox_msg_type: Option<MsgType>,   // mutation, info, align-request
+    pub priority: Option<Priority>,
+    pub status: Option<TaskStatus>,
+    pub agent: Option<String>,
+    pub orchestrator: Option<String>,
+    pub msg_to: Option<String>,      // Messaging target (supports wildcards)
+    pub msg_type: Option<MsgType>,   // mutation, info, align-request
 }
 
 pub enum Priority {
@@ -118,20 +118,20 @@ message Commit {
   repeated string conflict_labels = 10;
 
   // Hox metadata (fields 11-18)
-  optional int32 hox_priority = 11;           // 0=Critical, 1=High, 2=Medium, 3=Low
-  optional string hox_status = 12;            // "open", "in_progress", "blocked", "review", "done", "abandoned"
-  optional string hox_agent = 13;             // Agent identifier (e.g., "agent-42")
-  optional string hox_orchestrator = 14;      // Orchestrator identifier (e.g., "O-A-1")
-  optional string hox_msg_to = 15;            // Message target (supports glob patterns)
-  optional string hox_msg_type = 16;          // "mutation", "info", "align_request"
-  optional uint32 hox_loop_iteration = 17;    // Current loop iteration (for Ralph-style loops)
-  optional uint32 hox_loop_max_iterations = 18; // Maximum loop iterations allowed
+  optional int32 priority = 11;           // 0=Critical, 1=High, 2=Medium, 3=Low
+  optional string status = 12;            // "open", "in_progress", "blocked", "review", "done", "abandoned"
+  optional string agent = 13;             // Agent identifier (e.g., "agent-42")
+  optional string orchestrator = 14;      // Orchestrator identifier (e.g., "O-A-1")
+  optional string msg_to = 15;            // Message target (supports glob patterns)
+  optional string msg_type = 16;          // "mutation", "info", "align_request"
+  optional uint32 iteration = 17;    // Current loop iteration (for Ralph-style loops)
+  optional uint32 max_iterations = 18; // Maximum loop iterations allowed
 }
 ```
 
 ### 2.3 JJ Source File Locations
 
-**Critical files to modify in the jj fork:**
+**Critical files to modify in jj-dev:**
 
 | File Path | Purpose | What to Add |
 |-----------|---------|-------------|
@@ -141,7 +141,7 @@ message Commit {
 | `lib/src/revset.rs` | Revset function definitions | Add predicates to `BUILTIN_FUNCTION_MAP` (starts at line ~460) |
 | `lib/src/commit_builder.rs` | Commit builder API | Add setter methods for Hox metadata |
 | `cli/src/commands/describe.rs` | CLI describe command | Add `--set-priority`, `--set-status`, etc. flags |
-| `cli/src/commit_templater.rs` | Template rendering for commits | Register `hox_priority`, `hox_status`, etc. as template keywords |
+| `cli/src/commit_templater.rs` | Template rendering for commits | Register `priority`, `status`, etc. as template keywords |
 
 ### 2.4 Rust Struct Extension
 
@@ -167,14 +167,14 @@ pub struct Commit {
     pub secure_sig: Option<SecureSig>,
 
     // Hox metadata (all optional for backwards compatibility)
-    pub hox_priority: Option<Priority>,
-    pub hox_status: Option<TaskStatus>,
-    pub hox_agent: Option<String>,
-    pub hox_orchestrator: Option<String>,
-    pub hox_msg_to: Option<String>,
-    pub hox_msg_type: Option<MsgType>,
-    pub hox_loop_iteration: Option<u32>,
-    pub hox_loop_max_iterations: Option<u32>,
+    pub priority: Option<Priority>,
+    pub status: Option<TaskStatus>,
+    pub agent: Option<String>,
+    pub orchestrator: Option<String>,
+    pub msg_to: Option<String>,
+    pub msg_type: Option<MsgType>,
+    pub iteration: Option<u32>,
+    pub max_iterations: Option<u32>,
 }
 ```
 
@@ -191,7 +191,7 @@ map.insert("priority", |diagnostics, function, context| {
     let priority_str = expect_literal("string", arg)?;
     let priority = Priority::from_str(&priority_str)
         .map_err(|_| RevsetParseError::new("Invalid priority value"))?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxPriority(priority)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Priority(priority)))
 });
 
 // Status filter: status(in_progress), status(blocked)
@@ -200,14 +200,14 @@ map.insert("status", |diagnostics, function, context| {
     let status_str = expect_literal("string", arg)?;
     let status = TaskStatus::from_str(&status_str)
         .map_err(|_| RevsetParseError::new("Invalid status value"))?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxStatus(status)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Status(status)))
 });
 
 // Agent filter: agent("agent-42")
 map.insert("agent", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let pattern = expect_literal("string", arg)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxAgent(
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Agent(
         StringPattern::from_glob(&pattern)
     )))
 });
@@ -216,7 +216,7 @@ map.insert("agent", |diagnostics, function, context| {
 map.insert("orchestrator", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let pattern = expect_literal("string", arg)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxOrchestrator(
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Orchestrator(
         StringPattern::from_glob(&pattern)
     )))
 });
@@ -225,7 +225,7 @@ map.insert("orchestrator", |diagnostics, function, context| {
 map.insert("msg_to", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let pattern = expect_literal("string", arg)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgTo(
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::MsgTo(
         StringPattern::from_glob(&pattern)
     )))
 });
@@ -236,7 +236,7 @@ map.insert("msg_type", |diagnostics, function, context| {
     let msg_type_str = expect_literal("string", arg)?;
     let msg_type = MsgType::from_str(&msg_type_str)
         .map_err(|_| RevsetParseError::new("Invalid message type"))?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgType(msg_type)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::MsgType(msg_type)))
 });
 ```
 
@@ -322,29 +322,29 @@ Add template keywords for Hox metadata:
 
 ```rust
 // In CommitTemplateBuildFnTable::builtin()
-build_commit_method(method_table, "hox_priority", |commit| {
-    commit.hox_priority.map(|p| p.to_string()).unwrap_or_default()
+build_commit_method(method_table, "priority", |commit| {
+    commit.priority.map(|p| p.to_string()).unwrap_or_default()
 });
-build_commit_method(method_table, "hox_status", |commit| {
-    commit.hox_status.map(|s| s.to_string()).unwrap_or_default()
+build_commit_method(method_table, "status", |commit| {
+    commit.status.map(|s| s.to_string()).unwrap_or_default()
 });
-build_commit_method(method_table, "hox_agent", |commit| {
-    commit.hox_agent.clone().unwrap_or_default()
+build_commit_method(method_table, "agent", |commit| {
+    commit.agent.clone().unwrap_or_default()
 });
-build_commit_method(method_table, "hox_orchestrator", |commit| {
-    commit.hox_orchestrator.clone().unwrap_or_default()
+build_commit_method(method_table, "orchestrator", |commit| {
+    commit.orchestrator.clone().unwrap_or_default()
 });
-build_commit_method(method_table, "hox_msg_to", |commit| {
-    commit.hox_msg_to.clone().unwrap_or_default()
+build_commit_method(method_table, "msg_to", |commit| {
+    commit.msg_to.clone().unwrap_or_default()
 });
-build_commit_method(method_table, "hox_msg_type", |commit| {
-    commit.hox_msg_type.map(|m| m.to_string()).unwrap_or_default()
+build_commit_method(method_table, "msg_type", |commit| {
+    commit.msg_type.map(|m| m.to_string()).unwrap_or_default()
 });
-build_commit_method(method_table, "hox_loop_iteration", |commit| {
-    commit.hox_loop_iteration.map(|i| i.to_string()).unwrap_or_default()
+build_commit_method(method_table, "iteration", |commit| {
+    commit.iteration.map(|i| i.to_string()).unwrap_or_default()
 });
-build_commit_method(method_table, "hox_loop_max_iterations", |commit| {
-    commit.hox_loop_max_iterations.map(|i| i.to_string()).unwrap_or_default()
+build_commit_method(method_table, "max_iterations", |commit| {
+    commit.max_iterations.map(|i| i.to_string()).unwrap_or_default()
 });
 ```
 
@@ -352,10 +352,10 @@ build_commit_method(method_table, "hox_loop_max_iterations", |commit| {
 
 ```bash
 # Show Hox metadata in log
-jj log -T 'change_id ++ " [" ++ hox_status ++ "/" ++ hox_priority ++ "] " ++ description.first_line()'
+jj log -T 'change_id ++ " [" ++ status ++ "/" ++ priority ++ "] " ++ description.first_line()'
 
 # Custom log for orchestrator view
-jj log -T 'if(hox_agent, hox_agent ++ ": ", "") ++ description.first_line()'
+jj log -T 'if(agent, agent ++ ": ", "") ++ description.first_line()'
 ```
 
 ### 2.8 Backwards Compatibility
@@ -365,7 +365,7 @@ jj log -T 'if(hox_agent, hox_agent ++ ": ", "") ++ description.first_line()'
 | Scenario | Behavior |
 |----------|----------|
 | Vanilla jj reads Hox commit | Hox metadata fields ignored (protobuf `optional` semantics) |
-| jj-dev reads vanilla commit | All `hox_*` fields are `None` |
+| jj-dev reads vanilla commit | All metadata fields are `None` |
 | Mixed environment | Works correctly; Hox metadata preserved when written by jj-dev |
 
 **Implementation notes:**
@@ -399,20 +399,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hox_priority_roundtrip() {
+    fn test_priority_roundtrip() {
         let commit = create_test_commit();
         let proto = commit_to_proto(&commit);
         let restored = commit_from_proto(proto);
-        assert_eq!(commit.hox_priority, restored.hox_priority);
+        assert_eq!(commit.priority, restored.priority);
     }
 
     #[test]
-    fn test_backwards_compat_no_hox_fields() {
+    fn test_backwards_compat_no_metadata_fields() {
         // Proto without Hox fields should deserialize with None
         let proto = crate::protos::simple_store::Commit::default();
         let commit = commit_from_proto(proto);
-        assert!(commit.hox_priority.is_none());
-        assert!(commit.hox_status.is_none());
+        assert!(commit.priority.is_none());
+        assert!(commit.status.is_none());
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
     # Create commit with vanilla jj (simulated by not setting Hox fields)
     jj describe -m "vanilla commit"
     # Should have no Hox metadata
-    assert_eq "$(jj log -r @ -T 'hox_priority')" ""
+    assert_eq "$(jj log -r @ -T 'priority')" ""
 }
 ```
 
@@ -594,7 +594,7 @@ When an orchestrator commits a structural decision (e.g., "use `user_id`"), JJ r
 3. Agent is responsible for fixing: change `userId` to `user_id`
 4. Agent continues work after resolving
 
-**JJ Fork Enhancement**: Add `--mutation` flag to mark commits as structural decisions. Descendant conflicts from mutations are flagged differently than merge conflicts.
+**jj-dev Enhancement**: Add `--mutation` flag to mark commits as structural decisions. Descendant conflicts from mutations are flagged differently than merge conflicts.
 
 ### 5.3 Merge Conflicts
 
@@ -798,7 +798,7 @@ hox run                     # Let system decide
 
 ## 10. Implementation Roadmap
 
-### Phase 1: JJ Fork (Weeks 1-2)
+### Phase 1: jj-dev (Weeks 1-2)
 
 1. Extend `Commit` struct with Hox metadata fields
 2. Update protobuf schema (fields 11-16)
@@ -806,7 +806,7 @@ hox run                     # Let system decide
 4. Add revset predicates (`priority()`, `status()`, etc.)
 5. Add CLI commands (`--set-priority`, etc.)
 
-**Deliverable**: JJ fork with first-class Hox metadata
+**Deliverable**: jj-dev with first-class Hox metadata
 
 ### Phase 2: Core Hox (Weeks 3-4)
 
@@ -930,7 +930,7 @@ hox/
 | `turso` | External metrics storage | `metrics-turso` |
 | `surrealdb` | External metrics storage | `metrics-surreal` |
 
-### JJ Fork
+### jj-dev
 
 The modified JJ is either:
 - Git submodule at `jj-dev/`

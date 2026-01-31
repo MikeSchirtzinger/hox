@@ -8,7 +8,7 @@
 //! - No internal loop - bash controls the iteration loop
 //! - Compatible with external monitoring and control systems
 
-use crate::backpressure::run_all_checks;
+use crate::backpressure::run_all_checks_with_fix;
 use crate::prompt::{build_iteration_prompt, parse_context_update};
 use hox_agent::{
     execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise,
@@ -38,6 +38,7 @@ use tracing::{debug, info};
 /// * `model` - Model to use for agent spawning
 /// * `max_tokens` - Maximum tokens for agent response
 /// * `workspace_path` - Path to workspace for backpressure checks
+/// * `executor` - JJ command executor for running jj fix
 /// * `run_backpressure` - Whether to run backpressure checks
 ///
 /// # Returns
@@ -50,7 +51,7 @@ use tracing::{debug, info};
 /// - Files created/modified
 /// - Token usage
 /// - Stop signal (if any)
-pub async fn run_external_iteration(
+pub async fn run_external_iteration<E: JjExecutor>(
     task: &Task,
     context: &HandoffContext,
     backpressure: &BackpressureResult,
@@ -59,6 +60,7 @@ pub async fn run_external_iteration(
     model: Model,
     max_tokens: usize,
     workspace_path: &PathBuf,
+    executor: &E,
     run_backpressure: bool,
 ) -> Result<ExternalLoopResult> {
     info!(
@@ -100,9 +102,9 @@ pub async fn run_external_iteration(
         .files_touched
         .extend(exec_result.files_modified.clone());
 
-    // Run backpressure checks if enabled
+    // Run backpressure checks if enabled (with jj fix)
     let new_backpressure = if run_backpressure {
-        let bp = run_all_checks(workspace_path)?;
+        let bp = run_all_checks_with_fix(workspace_path, executor, Some(&task.change_id)).await?;
         info!(
             "Backpressure: tests={}, lints={}, builds={}",
             bp.tests_passed, bp.lints_passed, bp.builds_passed

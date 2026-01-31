@@ -11,9 +11,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hox_agent::{BackpressureResult, ExternalLoopState, LoopConfig, Model};
-use hox_core::{HandoffContext, OrchestratorId, Task};
+use hox_core::{DelegationStrategy, HandoffContext, OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
-use hox_jj::{JjCommand, JjExecutor, MetadataManager, RevsetQueries};
+use hox_jj::{BookmarkManager, JjCommand, JjExecutor, MetadataManager, RevsetQueries};
 use hox_orchestrator::{
     create_initial_state, load_state, run_external_iteration, save_state, Orchestrator,
     OrchestratorConfig, PhaseManager,
@@ -69,6 +69,10 @@ enum Commands {
         /// Maximum agents per orchestrator
         #[arg(long, default_value = "4")]
         max_agents: usize,
+
+        /// Enable hierarchical delegation (spawn child orchestrators for epics)
+        #[arg(long)]
+        delegate: bool,
     },
 
     /// Show orchestration status
@@ -130,6 +134,151 @@ enum Commands {
         /// Maximum oplog entries to show
         #[arg(long, default_value = "50")]
         max_oplog: usize,
+    },
+
+    /// Manage bookmarks for task assignments
+    Bookmark {
+        #[command(subcommand)]
+        action: BookmarkCommands,
+    },
+
+    /// Rollback operations (recovery from bad agent output)
+    Rollback {
+        /// Agent name to rollback (cleans workspace)
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Operation ID to restore to
+        #[arg(long)]
+        operation: Option<String>,
+
+        /// Number of operations to undo
+        #[arg(long)]
+        count: Option<usize>,
+
+        /// Remove agent workspace after rollback
+        #[arg(long)]
+        remove_workspace: bool,
+    },
+
+    /// DAG manipulation commands for task restructuring
+    Dag {
+        #[command(subcommand)]
+        action: DagCommands,
+    },
+}
+
+/// DAG manipulation subcommands
+#[derive(Subcommand)]
+enum DagCommands {
+    /// Convert sequential changes into parallel siblings
+    Parallelize {
+        /// Revset of changes to parallelize
+        revset: String,
+    },
+
+    /// Auto-distribute working copy changes to ancestor commits
+    Absorb {
+        /// Optional paths to absorb (all changes if omitted)
+        paths: Vec<String>,
+    },
+
+    /// Split a change into multiple changes by file groups
+    Split {
+        /// Change ID to split
+        change_id: String,
+
+        /// Files for the split (creates sibling with these files)
+        files: Vec<String>,
+    },
+
+    /// Squash a change into its parent
+    Squash {
+        /// Change ID to squash
+        change_id: String,
+    },
+
+    /// Squash specific files from source into target
+    SquashInto {
+        /// Source change ID
+        #[arg(long)]
+        from: String,
+
+        /// Target change ID
+        #[arg(long)]
+        into: String,
+
+        /// Optional paths to squash (all if omitted)
+        paths: Vec<String>,
+    },
+
+    /// Duplicate a change for speculative execution
+    Duplicate {
+        /// Change ID to duplicate
+        change_id: String,
+
+        /// Optional destination change (parent for duplicate)
+        #[arg(short, long)]
+        destination: Option<String>,
+    },
+
+    /// Create a change that undoes another (safe revert)
+    Backout {
+        /// Change ID to backout
+        change_id: String,
+    },
+
+    /// Show evolution log for a change (audit trail)
+    Evolog {
+        /// Change ID to show evolution for
+        change_id: String,
+    },
+
+    /// Clean up redundant parent relationships
+    SimplifyParents {
+        /// Change ID to simplify
+        change_id: String,
+    },
+}
+
+/// Bookmark management subcommands
+#[derive(Subcommand)]
+enum BookmarkCommands {
+    /// Assign a task to an agent
+    Assign {
+        /// Agent name
+        agent: String,
+
+        /// Change ID (defaults to current change if omitted)
+        change_id: Option<String>,
+    },
+
+    /// List bookmarks
+    List {
+        /// Filter pattern (e.g., "task/*", "agent/*/task/*")
+        #[arg(default_value = "*")]
+        pattern: String,
+    },
+
+    /// Find which agent owns a task
+    Owner {
+        /// Change ID
+        change_id: String,
+    },
+
+    /// Unassign a task from an agent
+    Unassign {
+        /// Agent name
+        agent: String,
+
+        /// Change ID
+        change_id: String,
+    },
+
+    /// List all tasks assigned to an agent
+    AgentTasks {
+        /// Agent name
+        agent: String,
     },
 }
 
@@ -259,7 +408,8 @@ async fn main() -> Result<()> {
             plan,
             orchestrators,
             max_agents,
-        } => cmd_orchestrate(plan, orchestrators, max_agents).await,
+            delegate,
+        } => cmd_orchestrate(plan, orchestrators, max_agents, delegate).await,
         Commands::Status => cmd_status().await,
         Commands::Patterns { action } => cmd_patterns(action).await,
         Commands::Validate { change, validators } => cmd_validate(change, validators).await,
@@ -272,6 +422,14 @@ async fn main() -> Result<()> {
         } => cmd_set(priority, status, agent, orchestrator).await,
         Commands::Loop { action } => cmd_loop(action).await,
         Commands::Dashboard { refresh, max_oplog } => cmd_dashboard(refresh, max_oplog).await,
+        Commands::Bookmark { action } => cmd_bookmark(action).await,
+        Commands::Rollback {
+            agent,
+            operation,
+            count,
+            remove_workspace,
+        } => cmd_rollback(agent, operation, count, remove_workspace).await,
+        Commands::Dag { action } => cmd_dag(action).await,
     }
 }
 
@@ -305,6 +463,11 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     println!("  .hox/config.json");
     println!("  .hox/patterns/");
     println!("  .hox/metrics/");
+    println!();
+    println!("To enable auto-formatting with jj fix, add to .jj/repo/config.toml:");
+    println!("  [fix.tools.rustfmt]");
+    println!("  command = [\"rustfmt\", \"--edition\", \"2021\"]");
+    println!("  patterns = [\"glob:*.rs\"]");
 
     // Handle PRD generation/loading
     let prd_doc = if let Some(prd_file) = from_prd {
@@ -381,15 +544,19 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     Ok(())
 }
 
-async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: usize) -> Result<()> {
+async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: usize, delegate: bool) -> Result<()> {
     info!("Starting orchestration: {}", plan);
 
     let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
 
     for i in 0..orchestrator_count {
         let id = OrchestratorId::new('A', (i + 1) as u32);
-        let config = OrchestratorConfig::new(id.clone(), jj.repo_root())
+        let mut config = OrchestratorConfig::new(id.clone(), jj.repo_root())
             .with_max_agents(max_agents);
+
+        if delegate {
+            config = config.with_delegation_strategy(DelegationStrategy::PhasePerChild);
+        }
 
         let mut orchestrator = Orchestrator::with_executor(config, jj.clone()).await?;
 
@@ -401,11 +568,21 @@ async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: us
 
         // Initialize and run
         orchestrator.initialize().await?;
-        println!("Started orchestrator {}", id);
+
+        if delegate {
+            println!("Started orchestrator {} with hierarchical delegation", id);
+            orchestrator.run_with_delegation().await?;
+        } else {
+            println!("Started orchestrator {}", id);
+        }
     }
 
-    println!("Orchestration started with {} orchestrator(s)", orchestrator_count);
-    println!("Use 'hox status' to check progress");
+    println!("Orchestration {} with {} orchestrator(s)",
+        if delegate { "completed" } else { "started" },
+        orchestrator_count);
+    if !delegate {
+        println!("Use 'hox status' to check progress");
+    }
 
     Ok(())
 }
@@ -417,10 +594,11 @@ async fn cmd_status() -> Result<()> {
     println!("Hox Status");
     println!("==========");
 
-    // Find orchestrators
-    let orchestrators = queries
-        .query("description(glob:\"Orchestrator: O-*\")")
-        .await?;
+    // Find orchestrators - try bookmark query first, fallback to description search
+    let orchestrators = match queries.all_orchestrators_by_bookmark().await {
+        Ok(orcks) => orcks,
+        Err(_) => queries.query("description(glob:\"Orchestrator: O-*\")").await?,
+    };
     println!("\nOrchestrators: {}", orchestrators.len());
 
     // Find in-progress tasks
@@ -431,12 +609,28 @@ async fn cmd_status() -> Result<()> {
     let blocked = queries.by_status("blocked").await?;
     println!("Blocked: {}", blocked.len());
 
+    // Find parallelizable tasks (Phase 6 power query)
+    let parallelizable = queries.parallelizable_tasks().await?;
+    println!("Parallelizable (independent heads): {}", parallelizable.len());
+
+    // Find empty/abandoned changes (Phase 6 power query)
+    let empty = queries.empty_changes().await?;
+    if !empty.is_empty() {
+        println!("Empty/Abandoned: {}", empty.len());
+    }
+
     // Find conflicts
     let conflicts = queries.conflicts().await?;
     if !conflicts.is_empty() {
         println!("\nConflicts: {}", conflicts.len());
         for c in &conflicts {
             println!("  - {}", c);
+
+            // Show what blocks this conflict (Phase 6 power query)
+            let blockers = queries.blocking_conflicts(&c).await.unwrap_or_default();
+            if !blockers.is_empty() {
+                println!("    Blocked by: {} conflicting ancestor(s)", blockers.len());
+            }
         }
     }
 
@@ -764,6 +958,7 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 model.into(),
                 max_tokens,
                 &jj.repo_root(),
+                &jj,
                 !no_backpressure,
             )
             .await?;
@@ -811,6 +1006,337 @@ async fn cmd_dashboard(refresh_ms: u64, max_oplog: usize) -> Result<()> {
     };
 
     hox_dashboard::run(config).await?;
+
+    Ok(())
+}
+
+async fn cmd_bookmark(action: BookmarkCommands) -> Result<()> {
+    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let bookmark_manager = BookmarkManager::new(jj.clone());
+
+    match action {
+        BookmarkCommands::Assign { agent, change_id } => {
+            let change = if let Some(id) = change_id {
+                id
+            } else {
+                // Use current change
+                let queries = RevsetQueries::new(jj);
+                queries
+                    .current()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("No current change"))?
+            };
+
+            bookmark_manager.assign_task(&agent, &change).await?;
+            println!("Assigned task {} to agent {}", change, agent);
+        }
+
+        BookmarkCommands::List { pattern } => {
+            let pattern_opt = if pattern == "*" { None } else { Some(pattern.as_str()) };
+            let bookmarks = bookmark_manager.list(pattern_opt).await?;
+
+            if bookmarks.is_empty() {
+                println!("No bookmarks found");
+                return Ok(());
+            }
+
+            println!("Bookmarks:");
+            for bookmark in bookmarks {
+                if let Some(tracking) = bookmark.tracking {
+                    println!("  {} -> {} (tracking: {})", bookmark.name, bookmark.change_id, tracking);
+                } else {
+                    println!("  {} -> {}", bookmark.name, bookmark.change_id);
+                }
+            }
+        }
+
+        BookmarkCommands::Owner { change_id } => {
+            let agent = bookmark_manager.task_agent(&change_id).await?;
+
+            if let Some(agent_name) = agent {
+                println!("Task {} is assigned to agent: {}", change_id, agent_name);
+            } else {
+                println!("Task {} is not assigned to any agent", change_id);
+            }
+        }
+
+        BookmarkCommands::Unassign { agent, change_id } => {
+            bookmark_manager.unassign_task(&agent, &change_id).await?;
+            println!("Unassigned task {} from agent {}", change_id, agent);
+        }
+
+        BookmarkCommands::AgentTasks { agent } => {
+            let tasks = bookmark_manager.agent_tasks(&agent).await?;
+
+            if tasks.is_empty() {
+                println!("Agent {} has no assigned tasks", agent);
+                return Ok(());
+            }
+
+            println!("Tasks assigned to agent {}:", agent);
+            for (task_id, change_id) in tasks {
+                println!("  {} -> {}", task_id, change_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_rollback(
+    agent: Option<String>,
+    operation: Option<String>,
+    count: Option<usize>,
+    remove_workspace: bool,
+) -> Result<()> {
+    use hox_orchestrator::RecoveryManager;
+
+    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let recovery_manager = RecoveryManager::new(jj.clone(), jj.repo_root().to_path_buf());
+
+    // Determine rollback mode
+    match (agent, operation, count) {
+        // Rollback specific agent to snapshot
+        (Some(agent_name), Some(op_id), _) => {
+            info!("Rolling back agent {} to operation {}", agent_name, op_id);
+            println!(
+                "Rolling back agent {} to operation {}...",
+                agent_name, op_id
+            );
+
+            let result = recovery_manager
+                .rollback_agent(&agent_name, &op_id, remove_workspace)
+                .await?;
+
+            println!("Rollback complete:");
+            println!("  Operations undone: {}", result.operations_undone);
+            println!("  Agent cleaned: {}", result.agent_cleaned);
+            println!("  Workspace removed: {}", result.workspace_removed);
+        }
+
+        // Restore to specific operation
+        (None, Some(op_id), _) => {
+            info!("Restoring to operation {}", op_id);
+            println!("Restoring to operation {}...", op_id);
+
+            // Create a recovery point from the operation ID
+            let recovery_point = hox_orchestrator::RecoveryPoint::new(
+                op_id.clone(),
+                format!("Manual restore to {}", op_id),
+            );
+
+            let result = recovery_manager.restore_from(&recovery_point).await?;
+
+            println!("Restore complete:");
+            println!("  Operations undone: {}", result.operations_undone);
+        }
+
+        // Undo last N operations
+        (None, None, Some(n)) => {
+            info!("Undoing last {} operations", n);
+            println!("Undoing last {} operations...", n);
+
+            let result = recovery_manager.rollback_operations(n).await?;
+
+            println!("Rollback complete:");
+            println!("  Operations undone: {}", result.operations_undone);
+        }
+
+        // List recent operations (no rollback)
+        (None, None, None) => {
+            println!("Recent operations:");
+
+            let operations = recovery_manager.recent_operations(10).await?;
+
+            if operations.is_empty() {
+                println!("  No operations found");
+                return Ok(());
+            }
+
+            for op in operations {
+                println!("  {} - {} ({})", op.id, op.description, op.timestamp);
+            }
+
+            println!("\nUsage:");
+            println!("  hox rollback --operation <op-id>        # Restore to specific operation");
+            println!("  hox rollback --count <n>                # Undo last N operations");
+            println!("  hox rollback --agent <name> --operation <op-id> # Rollback agent work");
+        }
+
+        // Invalid combinations
+        _ => {
+            anyhow::bail!("Invalid rollback options. Use --help for usage information.");
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_dag(action: DagCommands) -> Result<()> {
+    use hox_jj::DagOperations;
+
+    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let dag_ops = DagOperations::new(jj);
+
+    match action {
+        DagCommands::Parallelize { revset } => {
+            info!("Parallelizing changes in revset: {}", revset);
+            println!("Parallelizing changes: {}", revset);
+
+            let result = dag_ops.parallelize(&revset).await?;
+
+            println!("Parallelize complete:");
+            println!("  Changes restructured: {}", result.changes_restructured);
+            println!("  Clean: {}", result.clean);
+
+            if !result.conflicts.is_empty() {
+                println!("  Conflicts detected:");
+                for conflict in &result.conflicts {
+                    println!("    - {}", conflict);
+                }
+            }
+        }
+
+        DagCommands::Absorb { paths } => {
+            info!("Absorbing changes");
+            println!("Absorbing changes into ancestor commits...");
+
+            let paths_refs: Option<Vec<&str>> = if paths.is_empty() {
+                None
+            } else {
+                Some(paths.iter().map(|s| s.as_str()).collect())
+            };
+
+            let result = dag_ops
+                .absorb(paths_refs.as_deref())
+                .await?;
+
+            println!("Absorb complete:");
+            println!("  Hunks absorbed: {}", result.hunks_absorbed);
+            println!("  Affected changes: {}", result.affected_changes.len());
+
+            if !result.affected_changes.is_empty() {
+                println!("  Changes modified:");
+                for change_id in &result.affected_changes {
+                    println!("    - {}", change_id);
+                }
+            }
+        }
+
+        DagCommands::Split { change_id, files } => {
+            info!("Splitting change {} by files", change_id);
+            println!("Splitting change {}...", change_id);
+
+            if files.is_empty() {
+                anyhow::bail!("No files provided for split. Specify at least one file.");
+            }
+
+            let file_groups = vec![files];
+            let result = dag_ops.split_by_files(&change_id, &file_groups).await?;
+
+            println!("Split complete:");
+            println!("  New changes created: {}", result.new_changes.len());
+
+            if !result.new_changes.is_empty() {
+                println!("  New change IDs:");
+                for new_change in &result.new_changes {
+                    println!("    - {}", new_change);
+                }
+            }
+        }
+
+        DagCommands::Squash { change_id } => {
+            info!("Squashing change {}", change_id);
+            println!("Squashing change {} into parent...", change_id);
+
+            dag_ops.squash(&change_id).await?;
+
+            println!("Squash complete: {} folded into parent", change_id);
+        }
+
+        DagCommands::SquashInto { from, into, paths } => {
+            info!("Squashing from {} into {}", from, into);
+            println!("Squashing from {} into {}...", from, into);
+
+            let paths_refs: Option<Vec<&str>> = if paths.is_empty() {
+                None
+            } else {
+                Some(paths.iter().map(|s| s.as_str()).collect())
+            };
+
+            dag_ops
+                .squash_into(&from, &into, paths_refs.as_deref())
+                .await?;
+
+            if let Some(path_list) = paths_refs {
+                println!(
+                    "Squash complete: moved {} files from {} to {}",
+                    path_list.len(),
+                    from,
+                    into
+                );
+            } else {
+                println!("Squash complete: moved all changes from {} to {}", from, into);
+            }
+        }
+
+        DagCommands::Duplicate { change_id, destination } => {
+            info!("Duplicating change {}", change_id);
+            println!("Duplicating change {}...", change_id);
+
+            let new_change_id = dag_ops
+                .duplicate(&change_id, destination.as_deref())
+                .await?;
+
+            println!("Duplicate complete:");
+            println!("  Original: {}", change_id);
+            println!("  New change ID: {}", new_change_id);
+
+            if let Some(dest) = destination {
+                println!("  Destination: {}", dest);
+            }
+        }
+
+        DagCommands::Backout { change_id } => {
+            info!("Creating backout for {}", change_id);
+            println!("Creating backout change for {}...", change_id);
+
+            let backout_id = dag_ops.backout(&change_id).await?;
+
+            println!("Backout complete:");
+            println!("  Original change: {}", change_id);
+            println!("  Backout change ID: {}", backout_id);
+            println!("\nThis change reverses the effects of {} without destructive history editing.", change_id);
+        }
+
+        DagCommands::Evolog { change_id } => {
+            info!("Getting evolution log for {}", change_id);
+            println!("Evolution log for {}:", change_id);
+            println!();
+
+            let entries = dag_ops.evolution_log(&change_id).await?;
+
+            if entries.is_empty() {
+                println!("No evolution history found");
+                return Ok(());
+            }
+
+            println!("Complete audit trail ({} entries):", entries.len());
+            for (i, entry) in entries.iter().enumerate() {
+                println!("  {}. {} ({})", i + 1, entry.commit_id, entry.timestamp);
+                println!("     {}", entry.description);
+            }
+        }
+
+        DagCommands::SimplifyParents { change_id } => {
+            info!("Simplifying parents for {}", change_id);
+            println!("Simplifying parent relationships for {}...", change_id);
+
+            dag_ops.simplify_parents(&change_id).await?;
+
+            println!("Simplify complete: removed redundant parent relationships");
+        }
+    }
 
     Ok(())
 }
