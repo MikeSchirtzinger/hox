@@ -1,13 +1,13 @@
-# JJ Fork Enhancement Plan
+# JJ Development Enhancement Plan
 
-**Target Repository:** ~/dev/jj (forked from martinvonz/jj)
+**Target Repository:** ~/dev/hox/jj-dev (forked from martinvonz/jj)
 **Purpose:** Add first-class Hox metadata support
 
 ---
 
 ## Overview
 
-This document outlines the specific changes needed to the JJ codebase to support Hox orchestration metadata as first-class citizens.
+This document outlines the specific changes needed to the JJ development fork (jj-dev) to support Hox orchestration metadata as first-class citizens.
 
 ## Files to Modify
 
@@ -28,12 +28,12 @@ pub struct Commit {
     pub secure_sig: Option<SecureSig>,
 
     // Hox metadata (new fields)
-    pub hox_priority: Option<u8>,           // 0=Critical, 1=High, 2=Medium, 3=Low
-    pub hox_status: Option<String>,         // open, in_progress, blocked, review, done, abandoned
-    pub hox_agent: Option<String>,          // Agent identifier
-    pub hox_orchestrator: Option<String>,   // Orchestrator identifier (O-A-1 format)
-    pub hox_msg_to: Option<String>,         // Message target (supports wildcards)
-    pub hox_msg_type: Option<String>,       // mutation, info, align-request
+    pub priority: Option<u8>,           // 0=Critical, 1=High, 2=Medium, 3=Low
+    pub status: Option<String>,         // open, in_progress, blocked, review, done, abandoned
+    pub agent: Option<String>,          // Agent identifier
+    pub orchestrator: Option<String>,   // Orchestrator identifier (O-A-1 format)
+    pub msg_to: Option<String>,         // Message target (supports wildcards)
+    pub msg_type: Option<String>,       // mutation, info, align-request
 }
 ```
 
@@ -67,12 +67,12 @@ message Commit {
   optional bytes secure_sig = 9;
 
   // Hox metadata (fields 11-16)
-  optional uint32 hox_priority = 11;
-  optional string hox_status = 12;
-  optional string hox_agent = 13;
-  optional string hox_orchestrator = 14;
-  optional string hox_msg_to = 15;
-  optional string hox_msg_type = 16;
+  optional uint32 priority = 11;
+  optional string status = 12;
+  optional string agent = 13;
+  optional string orchestrator = 14;
+  optional string msg_to = 15;
+  optional string msg_type = 16;
 }
 ```
 
@@ -86,12 +86,12 @@ fn commit_to_proto(commit: &Commit) -> crate::protos::simple_store::Commit {
     // ... existing serialization ...
 
     // Hox metadata
-    proto.hox_priority = commit.hox_priority.map(|p| p as u32);
-    proto.hox_status = commit.hox_status.clone();
-    proto.hox_agent = commit.hox_agent.clone();
-    proto.hox_orchestrator = commit.hox_orchestrator.clone();
-    proto.hox_msg_to = commit.hox_msg_to.clone();
-    proto.hox_msg_type = commit.hox_msg_type.clone();
+    proto.priority = commit.priority.map(|p| p as u32);
+    proto.status = commit.status.clone();
+    proto.agent = commit.agent.clone();
+    proto.orchestrator = commit.orchestrator.clone();
+    proto.msg_to = commit.msg_to.clone();
+    proto.msg_type = commit.msg_type.clone();
 
     proto
 }
@@ -107,12 +107,12 @@ fn commit_from_proto(proto: crate::protos::simple_store::Commit) -> Commit {
         // ... existing fields ...
 
         // Hox metadata
-        hox_priority: proto.hox_priority.map(|p| p as u8),
-        hox_status: proto.hox_status,
-        hox_agent: proto.hox_agent,
-        hox_orchestrator: proto.hox_orchestrator,
-        hox_msg_to: proto.hox_msg_to,
-        hox_msg_type: proto.hox_msg_type,
+        priority: proto.priority.map(|p| p as u8),
+        status: proto.status,
+        agent: proto.agent,
+        orchestrator: proto.orchestrator,
+        msg_to: proto.msg_to,
+        msg_type: proto.msg_type,
     }
 }
 ```
@@ -126,23 +126,23 @@ The Git backend stores jj-specific data in a separate stacked table. Add Hox fie
 ```rust
 // In read_commit, after reading git commit
 if let Some(extra) = self.extra_metadata_store.get(&id)? {
-    commit.hox_priority = extra.hox_priority;
-    commit.hox_status = extra.hox_status;
-    commit.hox_agent = extra.hox_agent;
-    commit.hox_orchestrator = extra.hox_orchestrator;
-    commit.hox_msg_to = extra.hox_msg_to;
-    commit.hox_msg_type = extra.hox_msg_type;
+    commit.priority = extra.priority;
+    commit.status = extra.status;
+    commit.agent = extra.agent;
+    commit.orchestrator = extra.orchestrator;
+    commit.msg_to = extra.msg_to;
+    commit.msg_type = extra.msg_type;
 }
 
 // In write_commit, store to extra_metadata_store
 let extra = ExtraCommitMetadata {
     // ... existing fields ...
-    hox_priority: commit.hox_priority,
-    hox_status: commit.hox_status.clone(),
-    hox_agent: commit.hox_agent.clone(),
-    hox_orchestrator: commit.hox_orchestrator.clone(),
-    hox_msg_to: commit.hox_msg_to.clone(),
-    hox_msg_type: commit.hox_msg_type.clone(),
+    priority: commit.priority,
+    status: commit.status.clone(),
+    agent: commit.agent.clone(),
+    orchestrator: commit.orchestrator.clone(),
+    msg_to: commit.msg_to.clone(),
+    msg_type: commit.msg_type.clone(),
 };
 ```
 
@@ -155,12 +155,12 @@ pub enum RevsetFilterPredicate {
     // ... existing variants ...
 
     // Hox predicates
-    HoxPriority(StringExpression),
-    HoxStatus(StringExpression),
-    HoxAgent(StringExpression),
-    HoxOrchestrator(StringExpression),
-    HoxMsgTo(StringExpression),
-    HoxMsgType(StringExpression),
+    Priority(StringExpression),
+    Status(StringExpression),
+    Agent(StringExpression),
+    Orchestrator(StringExpression),
+    MsgTo(StringExpression),
+    MsgType(StringExpression),
 }
 ```
 
@@ -170,37 +170,37 @@ pub enum RevsetFilterPredicate {
 map.insert("priority", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxPriority(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Priority(expr)))
 });
 
 map.insert("status", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxStatus(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Status(expr)))
 });
 
 map.insert("agent", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxAgent(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Agent(expr)))
 });
 
 map.insert("orchestrator", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxOrchestrator(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::Orchestrator(expr)))
 });
 
 map.insert("msg_to", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgTo(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::MsgTo(expr)))
 });
 
 map.insert("msg_type", |diagnostics, function, context| {
     let [arg] = function.expect_exact_arguments()?;
     let expr = expect_string_expression(diagnostics, arg, context)?;
-    Ok(RevsetExpression::filter(RevsetFilterPredicate::HoxMsgType(expr)))
+    Ok(RevsetExpression::filter(RevsetFilterPredicate::MsgType(expr)))
 });
 ```
 
@@ -208,8 +208,8 @@ map.insert("msg_type", |diagnostics, function, context| {
 
 ```rust
 // In evaluate_predicate or similar
-RevsetFilterPredicate::HoxPriority(expr) => {
-    let priority_str = match commit.hox_priority {
+RevsetFilterPredicate::Priority(expr) => {
+    let priority_str = match commit.priority {
         Some(0) => "critical",
         Some(1) => "high",
         Some(2) => "medium",
@@ -219,8 +219,8 @@ RevsetFilterPredicate::HoxPriority(expr) => {
     expr.matches(priority_str)
 }
 
-RevsetFilterPredicate::HoxStatus(expr) => {
-    commit.hox_status.as_ref().map_or(false, |s| expr.matches(s))
+RevsetFilterPredicate::Status(expr) => {
+    commit.status.as_ref().map_or(false, |s| expr.matches(s))
 }
 
 // Similar for agent, orchestrator, msg_to, msg_type
@@ -274,7 +274,7 @@ if let Some(priority) = &args.set_priority {
         "low" => 3,
         _ => return Err(user_error("Invalid priority")),
     };
-    new_commit.hox_priority = Some(p);
+    new_commit.priority = Some(p);
 }
 
 if let Some(status) = &args.set_status {
@@ -283,7 +283,7 @@ if let Some(status) = &args.set_status {
     if !valid.contains(&status.as_str()) {
         return Err(user_error("Invalid status"));
     }
-    new_commit.hox_status = Some(status.clone());
+    new_commit.status = Some(status.clone());
 }
 
 // Similar for agent, orchestrator, msg_to, msg_type
@@ -297,33 +297,33 @@ if let Some(status) = &args.set_status {
 impl CommitBuilder {
     // ... existing methods ...
 
-    pub fn set_hox_priority(mut self, priority: Option<u8>) -> Self {
-        self.commit.hox_priority = priority;
+    pub fn set_priority(mut self, priority: Option<u8>) -> Self {
+        self.commit.priority = priority;
         self
     }
 
-    pub fn set_hox_status(mut self, status: Option<String>) -> Self {
-        self.commit.hox_status = status;
+    pub fn set_status(mut self, status: Option<String>) -> Self {
+        self.commit.status = status;
         self
     }
 
-    pub fn set_hox_agent(mut self, agent: Option<String>) -> Self {
-        self.commit.hox_agent = agent;
+    pub fn set_agent(mut self, agent: Option<String>) -> Self {
+        self.commit.agent = agent;
         self
     }
 
-    pub fn set_hox_orchestrator(mut self, orchestrator: Option<String>) -> Self {
-        self.commit.hox_orchestrator = orchestrator;
+    pub fn set_orchestrator(mut self, orchestrator: Option<String>) -> Self {
+        self.commit.orchestrator = orchestrator;
         self
     }
 
-    pub fn set_hox_msg_to(mut self, msg_to: Option<String>) -> Self {
-        self.commit.hox_msg_to = msg_to;
+    pub fn set_msg_to(mut self, msg_to: Option<String>) -> Self {
+        self.commit.msg_to = msg_to;
         self
     }
 
-    pub fn set_hox_msg_type(mut self, msg_type: Option<String>) -> Self {
-        self.commit.hox_msg_type = msg_type;
+    pub fn set_msg_type(mut self, msg_type: Option<String>) -> Self {
+        self.commit.msg_type = msg_type;
         self
     }
 }
@@ -411,7 +411,7 @@ Flag commits that cause conflicts in descendants when they're marked as mutation
 ```rust
 pub struct Commit {
     // ...
-    pub hox_is_mutation: bool,  // If true, descendant conflicts are "mutation conflicts"
+    pub is_mutation: bool,  // If true, descendant conflicts are "mutation conflicts"
 }
 ```
 
@@ -420,9 +420,9 @@ pub struct Commit {
 If metrics become complex, add a dedicated field:
 
 ```rust
-pub hox_metrics: Option<HoxMetrics>,
+pub metrics: Option<Metrics>,
 
-pub struct HoxMetrics {
+pub struct Metrics {
     pub tool_calls: u32,
     pub failures: u32,
     pub time_ms: u64,
@@ -436,4 +436,4 @@ Store orchestrator state at workspace level, not just commit level.
 
 ---
 
-*End of JJ Fork Plan*
+*End of JJ Development Plan*

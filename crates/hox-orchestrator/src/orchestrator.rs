@@ -5,7 +5,10 @@ use hox_core::{
     AgentId, ChangeId, ChildHandle, ChildStatus, DelegationPlan, DelegationStrategy, HoxError,
     HoxMetadata, MessageType, OrchestratorId, Phase, Result, Task, TaskStatus,
 };
-use hox_jj::{JjCommand, JjExecutor, MetadataManager, OpLogEvent, OpLogWatcher, RevsetQueries};
+use hox_jj::{
+    AbsorbResult, BookmarkManager, DagOperations, JjCommand, JjExecutor, MetadataManager,
+    OpLogEvent, OpLogWatcher, ParallelizeResult, RevsetQueries, SplitResult,
+};
 
 use crate::loop_engine::LoopEngine;
 use crate::workspace::WorkspaceManager as WM;
@@ -159,6 +162,12 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
             let manager = MetadataManager::new(self.executor.clone());
             manager.set(change_id, &metadata).await?;
+
+            // Create orchestrator bookmark
+            let bookmark_manager = BookmarkManager::new(self.executor.clone());
+            bookmark_manager
+                .mark_orchestrator(&self.config.id.to_string(), change_id)
+                .await?;
         }
 
         self.state = OrchestratorState::Initialized;
@@ -202,7 +211,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             )));
         }
 
-        // Set agent metadata
+        // Set agent metadata and create bookmark assignment
         let queries = RevsetQueries::new(self.executor.clone());
         if let Some(change_id) = queries.current().await? {
             let metadata = HoxMetadata::new()
@@ -212,6 +221,12 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
             let manager = MetadataManager::new(self.executor.clone());
             manager.set(&change_id, &metadata).await?;
+
+            // Create bookmark assignment for the agent
+            let bookmark_manager = BookmarkManager::new(self.executor.clone());
+            bookmark_manager
+                .assign_task(&agent_name, &change_id)
+                .await?;
         }
 
         self.agents.insert(agent_name.clone(), agent_id.clone());
@@ -250,6 +265,8 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Check for alignment requests from agents
     pub async fn check_align_requests(&self) -> Result<Vec<(ChangeId, String)>> {
         let queries = RevsetQueries::new(self.executor.clone());
+
+        // Use description-based query for now - alignment requests don't have dedicated bookmarks
         let changes = queries.align_requests().await?;
 
         let mut requests = Vec::new();
@@ -353,9 +370,12 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         info!("Integrating agent work");
         self.state = OrchestratorState::Integrating;
 
-        // Get all agent changes
+        // Get all agent changes - try bookmark-based query first, fallback to description
         let queries = RevsetQueries::new(self.executor.clone());
-        let agent_changes = queries.by_orchestrator(&self.config.id.to_string()).await?;
+        let agent_changes = match queries.all_orchestrators_by_bookmark().await {
+            Ok(changes) => changes,
+            Err(_) => queries.by_orchestrator(&self.config.id.to_string()).await?,
+        };
 
         if agent_changes.len() > 1 {
             // Merge all agent changes
@@ -371,11 +391,23 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                 return Err(HoxError::MergeConflict(output.stderr));
             }
 
-            // Check for conflicts
+            // Check for conflicts and attempt resolution
             let conflicts = queries.conflicts().await?;
             if !conflicts.is_empty() {
-                warn!("Merge produced {} conflicts", conflicts.len());
-                // TODO: Handle conflicts - spawn integration agent
+                warn!("Merge produced {} conflicts, attempting resolution", conflicts.len());
+
+                let resolver = crate::ConflictResolver::new(self.executor.clone());
+                let report = resolver.resolve_all().await?;
+
+                if report.needs_human > 0 {
+                    warn!("{} conflicts need human review", report.needs_human);
+                }
+                if report.failed > 0 {
+                    warn!("{} conflicts failed to resolve", report.failed);
+                }
+                if report.auto_resolved > 0 {
+                    info!("Auto-resolved {} conflicts", report.auto_resolved);
+                }
             }
         }
 
@@ -725,11 +757,24 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
             if !conflicts.is_empty() {
                 warn!(
-                    "Integration produced {} conflicts, spawning resolution agent",
+                    "Integration produced {} conflicts, attempting resolution",
                     conflicts.len()
                 );
-                self.spawn_agent("Resolve merge conflicts from child integration")
-                    .await?;
+
+                let resolver = crate::ConflictResolver::new(self.executor.clone());
+                let report = resolver.resolve_all().await?;
+
+                if report.needs_human > 0 {
+                    warn!(
+                        "{} conflicts need human review, spawning resolution agent",
+                        report.needs_human
+                    );
+                    self.spawn_agent("Resolve merge conflicts from child integration")
+                        .await?;
+                }
+                if report.auto_resolved > 0 {
+                    info!("Auto-resolved {} conflicts", report.auto_resolved);
+                }
             }
         } else if child_heads.len() == 1 {
             info!("Single child, no merge needed");
@@ -738,6 +783,67 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         }
 
         Ok(())
+    }
+
+    /// Optimize DAG by parallelizing sequential tasks
+    ///
+    /// After planning tasks sequentially, this restructures the DAG for parallel execution.
+    /// Use this when you have independent tasks that were created in sequence but can run
+    /// in parallel.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After creating sequential task changes
+    /// orchestrator.optimize_dag("heads(bookmarks(glob:\"task-*\"))").await?;
+    /// ```
+    pub async fn optimize_dag(&self, task_range: &str) -> Result<ParallelizeResult> {
+        info!("Optimizing DAG for parallel execution: {}", task_range);
+        let dag_ops = DagOperations::new(self.executor.clone());
+        dag_ops.parallelize(task_range).await
+    }
+
+    /// Absorb fixes back to agent branches
+    ///
+    /// After integration testing, this automatically distributes fixes back to the
+    /// agent branches that introduced the bugs. This is safer than manual cherry-picking
+    /// and preserves attribution.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After making fixes in integration branch
+    /// orchestrator.absorb_fixes(Some(&["src/fixed_file.rs"])).await?;
+    /// ```
+    pub async fn absorb_fixes(&self, paths: Option<&[&str]>) -> Result<AbsorbResult> {
+        info!("Absorbing fixes back to agent branches");
+        let dag_ops = DagOperations::new(self.executor.clone());
+        dag_ops.absorb(paths).await
+    }
+
+    /// Decompose a task into smaller subtasks
+    ///
+    /// When an agent reports a task is too large, this splits it into smaller file-based
+    /// subtasks. Each file group becomes a separate change that can be assigned independently.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let file_groups = vec![
+    ///     vec!["src/main.rs".to_string()],
+    ///     vec!["src/lib.rs".to_string(), "src/utils.rs".to_string()],
+    /// ];
+    /// orchestrator.decompose_task("abc123", &file_groups).await?;
+    /// ```
+    pub async fn decompose_task(
+        &self,
+        change_id: &str,
+        file_groups: &[Vec<String>],
+    ) -> Result<SplitResult> {
+        info!(
+            "Decomposing task {} into {} subtasks",
+            change_id,
+            file_groups.len()
+        );
+        let dag_ops = DagOperations::new(self.executor.clone());
+        dag_ops.split_by_files(change_id, file_groups).await
     }
 }
 

@@ -1,7 +1,7 @@
 //! Hox metadata management for JJ changes
 //!
 //! This module provides helpers for reading and writing Hox metadata
-//! on JJ changes. Until the JJ fork is complete, metadata is stored
+//! on JJ changes. Until jj-dev is complete, metadata is stored
 //! in structured description text.
 
 use hox_core::{ChangeId, HoxMetadata, MessageType, Priority, Result, TaskStatus};
@@ -119,7 +119,7 @@ impl<E: JjExecutor> MetadataManager<E> {
     /// Set metadata on a change using jj describe
     ///
     /// Note: This updates the change description to include metadata.
-    /// When the JJ fork is complete, this will use --set-priority etc.
+    /// When jj-dev is complete, this will use --set-priority etc.
     pub async fn set(&self, change_id: &ChangeId, metadata: &HoxMetadata) -> Result<()> {
         // First read existing description
         let output = self

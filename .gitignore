@@ -1,6 +1,6 @@
 # Rust
 /target
-jj-fork/target/
+jj-dev/
 Cargo.lock
 
 # IDE

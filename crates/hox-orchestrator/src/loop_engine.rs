@@ -9,8 +9,9 @@
 //! This prevents context compaction/drift that plagues long-running agents.
 
 use crate::activity_logger::ActivityLogger;
-use crate::backpressure::run_all_checks;
+use crate::backpressure::run_all_checks_with_fix;
 use crate::prompt::{build_iteration_prompt, parse_context_update};
+use crate::recovery::RecoveryManager;
 use crate::workspace::WorkspaceManager;
 use hox_agent::{
     execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise, LoopConfig,
@@ -83,12 +84,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         // Initial context from task
         let mut context = self.read_context(task).await?;
 
-        // Initial backpressure - run before first iteration
+        // Initial backpressure - run before first iteration (with jj fix)
         let mut backpressure = if self.config.backpressure_enabled {
-            run_all_checks(&self.workspace_path)?
+            run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?
         } else {
             BackpressureResult::all_pass()
         };
+
+        // Create recovery manager for rollback capability
+        let recovery_manager = RecoveryManager::new(self.executor.clone(), self.workspace_path.clone());
 
         for iteration in 1..=self.config.max_iterations {
             info!("=== Iteration {} of {} ===", iteration, self.config.max_iterations);
@@ -129,6 +133,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 });
             }
 
+            // Create recovery point before spawning agent
+            let recovery_point = recovery_manager
+                .create_recovery_point(format!("Before iteration {}", iteration))
+                .await?;
+            debug!(
+                "Recovery point created: {} ({})",
+                recovery_point.operation_id, recovery_point.description
+            );
+
             // Build prompt
             let prompt = build_iteration_prompt(
                 task,
@@ -148,6 +161,21 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 self.config.max_tokens,
             )
             .await?;
+
+            // Check if agent output is empty or broken
+            if result.output.trim().is_empty() {
+                warn!("Agent iteration {} produced empty output, rolling back", iteration);
+
+                // Rollback to recovery point
+                let rollback_result = recovery_manager.restore_from(&recovery_point).await?;
+                info!(
+                    "Rolled back {} operations due to empty agent output",
+                    rollback_result.operations_undone
+                );
+
+                // Continue to next iteration
+                continue;
+            }
 
             // Update usage
             if let Some(usage) = &result.usage {
@@ -180,9 +208,9 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 context.files_touched.extend(iteration_files_modified.clone());
             }
 
-            // Run backpressure checks
+            // Run backpressure checks (with jj fix)
             if self.config.backpressure_enabled {
-                backpressure = run_all_checks(&self.workspace_path)?;
+                backpressure = run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?;
                 info!(
                     "Backpressure: tests={}, lints={}, builds={}",
                     backpressure.tests_passed,
