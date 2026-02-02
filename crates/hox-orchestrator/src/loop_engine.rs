@@ -9,7 +9,7 @@
 //! This prevents context compaction/drift that plagues long-running agents.
 
 use crate::activity_logger::ActivityLogger;
-use crate::backpressure::run_all_checks_with_fix;
+use crate::backpressure::{run_all_checks_with_fix, run_failed_checks};
 use crate::prompt::{build_iteration_prompt, parse_context_update};
 use crate::recovery::RecoveryManager;
 use crate::workspace::WorkspaceManager;
@@ -17,7 +17,7 @@ use hox_agent::{
     execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise, LoopConfig,
     LoopResult, StopReason, Usage,
 };
-use hox_core::{BackpressureStatus, HandoffContext, HoxError, Result, Task};
+use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -84,18 +84,25 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         // Initial context from task
         let mut context = self.read_context(task).await?;
 
-        // Initial backpressure - run before first iteration (with jj fix)
-        let mut backpressure = if self.config.backpressure_enabled {
-            run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?
-        } else {
-            BackpressureResult::all_pass()
-        };
+        // Skip initial backpressure - first iteration always runs.
+        // Backpressure feedback only matters starting from iteration 2.
+        let mut backpressure = BackpressureResult::all_pass();
 
         // Create recovery manager for rollback capability
         let recovery_manager = RecoveryManager::new(self.executor.clone(), self.workspace_path.clone());
 
-        for iteration in 1..=self.config.max_iterations {
-            info!("=== Iteration {} of {} ===", iteration, self.config.max_iterations);
+        let mut iteration: usize = 0;
+        loop {
+            iteration += 1;
+            if self.config.max_iterations > 0 && iteration > self.config.max_iterations {
+                break;
+            }
+            let max_display = if self.config.max_iterations == 0 {
+                "unlimited".to_string()
+            } else {
+                self.config.max_iterations.to_string()
+            };
+            info!("=== Iteration {} of {} ===", iteration, max_display);
 
             // Log iteration start
             if let Some(logger) = &self.activity_logger {
@@ -208,21 +215,34 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 context.files_touched.extend(iteration_files_modified.clone());
             }
 
-            // Run backpressure checks (with jj fix)
+            // Run backpressure checks (selective: only re-run previously failed)
             if self.config.backpressure_enabled {
-                backpressure = run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?;
-                info!(
-                    "Backpressure: tests={}, lints={}, builds={}",
-                    backpressure.tests_passed,
-                    backpressure.lints_passed,
-                    backpressure.builds_passed
-                );
+                backpressure = if iteration == 1 {
+                    // First iteration: run all checks with jj fix to establish baseline
+                    run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?
+                } else {
+                    // Subsequent: only re-run checks that failed last time
+                    run_failed_checks(&self.workspace_path, &backpressure)?
+                };
+
+                for check in &backpressure.checks {
+                    info!(
+                        "  {} {}",
+                        check.name,
+                        if check.passed { "PASSED" } else { "FAILED" }
+                    );
+                }
 
                 // Update context with backpressure status
                 context.backpressure_status = Some(BackpressureStatus {
-                    tests_passed: backpressure.tests_passed,
-                    lints_passed: backpressure.lints_passed,
-                    builds_passed: backpressure.builds_passed,
+                    checks: backpressure
+                        .checks
+                        .iter()
+                        .map(|c| CheckStatusEntry {
+                            name: c.name.clone(),
+                            passed: c.passed,
+                        })
+                        .collect(),
                     last_errors: backpressure.errors.clone(),
                 });
             }
@@ -322,7 +342,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             }
         }
 
-        // Max iterations reached
+        // Max iterations reached (only when max_iterations > 0)
         warn!("Max iterations ({}) reached", self.config.max_iterations);
 
         // Log completion
@@ -492,21 +512,16 @@ fn format_description(task: &Task, context: &HandoffContext, iteration: usize) -
         }
     }
 
-    // Backpressure status
+    // Backpressure status (dynamic checks)
     if let Some(bp) = &context.backpressure_status {
         desc.push_str("\n## Backpressure\n\n");
-        desc.push_str(&format!(
-            "Tests: {}\n",
-            if bp.tests_passed { "PASSED" } else { "FAILED" }
-        ));
-        desc.push_str(&format!(
-            "Lints: {}\n",
-            if bp.lints_passed { "PASSED" } else { "FAILED" }
-        ));
-        desc.push_str(&format!(
-            "Builds: {}\n",
-            if bp.builds_passed { "PASSED" } else { "FAILED" }
-        ));
+        for check in &bp.checks {
+            desc.push_str(&format!(
+                "{}: {}\n",
+                check.name,
+                if check.passed { "PASSED" } else { "FAILED" }
+            ));
+        }
     }
 
     desc
@@ -576,5 +591,36 @@ Some description
         assert!(desc.contains("Adding tests"));
         assert!(desc.contains("Created module"));
         assert!(desc.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_format_description_with_dynamic_checks() {
+        let task = Task::new("test-id", "Fix build");
+        let context = HandoffContext {
+            current_focus: "Fixing".to_string(),
+            backpressure_status: Some(BackpressureStatus {
+                checks: vec![
+                    CheckStatusEntry {
+                        name: "build".into(),
+                        passed: true,
+                    },
+                    CheckStatusEntry {
+                        name: "lint".into(),
+                        passed: false,
+                    },
+                    CheckStatusEntry {
+                        name: "test".into(),
+                        passed: true,
+                    },
+                ],
+                last_errors: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let desc = format_description(&task, &context, 2);
+        assert!(desc.contains("build: PASSED"));
+        assert!(desc.contains("lint: FAILED"));
+        assert!(desc.contains("test: PASSED"));
     }
 }

@@ -6,6 +6,7 @@
 //! - Backpressure errors to fix
 //! - File operation instructions
 
+use crate::backpressure::format_errors_for_prompt;
 use hox_agent::{file_operation_instructions, BackpressureResult};
 use hox_core::{HandoffContext, Task};
 
@@ -26,9 +27,14 @@ pub fn build_iteration_prompt(
     let mut prompt = String::new();
 
     // Header
+    let max_display = if max_iterations == 0 {
+        "unlimited".to_string()
+    } else {
+        max_iterations.to_string()
+    };
     prompt.push_str(&format!(
         "# HOX AGENT - Iteration {} of {}\n\n",
-        iteration, max_iterations
+        iteration, max_display
     ));
 
     // Task section
@@ -74,44 +80,32 @@ pub fn build_iteration_prompt(
         prompt.push('\n');
     }
 
-    // Validation status
-    prompt.push_str("## VALIDATION STATUS\n\n");
-    prompt.push_str(&format!(
-        "- Tests: {}\n",
-        if backpressure.tests_passed {
-            "PASSED"
-        } else {
-            "FAILED"
+    // Validation status (dynamic check names)
+    if !backpressure.checks.is_empty() {
+        prompt.push_str("## VALIDATION STATUS\n\n");
+        for check in &backpressure.checks {
+            prompt.push_str(&format!(
+                "- {}: {}\n",
+                check.name,
+                if check.passed { "PASSED" } else { "FAILED" }
+            ));
         }
-    ));
-    prompt.push_str(&format!(
-        "- Lints: {}\n",
-        if backpressure.lints_passed {
-            "PASSED"
-        } else {
-            "FAILED"
-        }
-    ));
-    prompt.push_str(&format!(
-        "- Builds: {}\n",
-        if backpressure.builds_passed {
-            "PASSED"
-        } else {
-            "FAILED"
-        }
-    ));
-    prompt.push('\n');
-
-    // Errors to fix
-    if !backpressure.errors.is_empty() {
-        prompt.push_str("## ERRORS TO FIX\n\n");
-        prompt.push_str("You MUST fix these errors before proceeding:\n\n");
-        for error in &backpressure.errors {
-            prompt.push_str("```\n");
-            prompt.push_str(error);
-            prompt.push_str("\n```\n\n");
-        }
+        prompt.push('\n');
     }
+
+    // Breaking errors only (via smart truncation)
+    let errors_section = format_errors_for_prompt(backpressure);
+    if !errors_section.is_empty() {
+        prompt.push_str(&errors_section);
+    }
+
+    // Batch operation guidance
+    prompt.push_str("## EXECUTION STRATEGY\n\n");
+    prompt.push_str("**Batch your operations for efficiency:**\n");
+    prompt.push_str("1. Read ALL relevant files first before making changes\n");
+    prompt.push_str("2. Plan ALL fixes together\n");
+    prompt.push_str("3. Write ALL file changes in a single response\n");
+    prompt.push_str("This minimizes round-trips and speeds up iteration.\n\n");
 
     // File operation instructions
     prompt.push_str(file_operation_instructions());
@@ -138,10 +132,10 @@ pub fn build_iteration_prompt(
     prompt.push_str("PROGRESS: <what was completed this iteration>\n");
     prompt.push_str("NEXT: <what needs to happen next>\n");
     prompt.push_str("BLOCKERS: <any blockers, or 'none'>\n");
-    prompt.push_str("```\n\n");
+    prompt.push_str("```\n");
 
     // Completion signal instructions
-    prompt.push_str("## COMPLETION SIGNAL\n\n");
+    prompt.push_str("\n## COMPLETION SIGNAL\n\n");
     prompt.push_str("When the task is fully complete and all validation checks pass, signal completion:\n\n");
     prompt.push_str("<promise>COMPLETE</promise>\n\n");
     prompt.push_str("Optionally include reasoning for completion:\n\n");
@@ -158,9 +152,16 @@ pub fn build_iteration_prompt(
 /// Parse context updates from agent output
 pub fn parse_context_update(output: &str) -> Option<HandoffContext> {
     let start = output.find("```context")?;
-    let end = output[start..].find("```\n").or_else(|| output[start..].rfind("```"))?;
+    let content_start = start + "```context".len();
 
-    let block = &output[start + "```context".len()..start + end];
+    // Find the closing ``` after the opening tag
+    let end = output[content_start..].find("```").map(|e| content_start + e)?;
+
+    if end <= content_start {
+        return None;
+    }
+
+    let block = &output[content_start..end];
 
     let mut context = HandoffContext::default();
 
@@ -205,6 +206,8 @@ mod tests {
 
     #[test]
     fn test_build_iteration_prompt() {
+        use hox_agent::{CheckOutcome, Severity};
+
         let task = make_test_task();
         let context = HandoffContext {
             current_focus: "Adding function".to_string(),
@@ -217,20 +220,33 @@ mod tests {
             backpressure_status: None,
         };
         let backpressure = BackpressureResult {
-            tests_passed: true,
-            lints_passed: false,
-            builds_passed: true,
-            errors: vec!["clippy warning: unused variable".to_string()],
+            checks: vec![
+                CheckOutcome {
+                    name: "build".into(),
+                    passed: true,
+                    severity: Severity::Breaking,
+                    output: String::new(),
+                },
+                CheckOutcome {
+                    name: "lint".into(),
+                    passed: false,
+                    severity: Severity::Breaking,
+                    output: "clippy warning: unused variable".into(),
+                },
+            ],
+            errors: vec!["clippy warning: unused variable".into()],
         };
 
-        let prompt = build_iteration_prompt(&task, &context, &backpressure, 1, 20);
+        let prompt = build_iteration_prompt(&task, &context, &backpressure, 1, 0);
 
-        assert!(prompt.contains("HOX AGENT - Iteration 1 of 20"));
+        assert!(prompt.contains("HOX AGENT - Iteration 1 of unlimited"));
         assert!(prompt.contains("hello world"));
         assert!(prompt.contains("Adding function"));
-        assert!(prompt.contains("Lints: FAILED"));
+        assert!(prompt.contains("lint: FAILED"));
         assert!(prompt.contains("clippy warning"));
         assert!(prompt.contains("<write_to_file>"));
+        assert!(prompt.contains("Batch your operations"));
+        assert!(prompt.contains("COMPLETION SIGNAL"));
     }
 
     #[test]
@@ -266,5 +282,28 @@ BLOCKERS: Need API documentation
 
         let context = parse_context_update(output).unwrap();
         assert_eq!(context.blockers, vec!["Need API documentation"]);
+    }
+
+    #[test]
+    fn test_parse_context_no_closing_backticks() {
+        // Agent output that ends without proper closing
+        let output = "Some output\n```context\nFOCUS: test\n";
+        assert!(parse_context_update(output).is_none());
+    }
+
+    #[test]
+    fn test_parse_context_at_end_of_output() {
+        // Context block at very end, closing ``` without trailing newline
+        let output = "Some output\n```context\nFOCUS: test\nPROGRESS: done\n```";
+        let context = parse_context_update(output).unwrap();
+        assert_eq!(context.current_focus, "test");
+    }
+
+    #[test]
+    fn test_parse_context_truncated_output() {
+        // Simulate truncated output where closing ``` is missing
+        let output = "Let me create a file:\n\n<write_to_file>\n<path>foo.py</path>\n<content>\nprint('hello')\n</content>\n</write_to_file>\n\n```context\nFOCUS: creating files\nPROGRESS: created foo.py\nNEXT: add tests\nBLOCKERS: none";
+        // No closing ```, should return None
+        assert!(parse_context_update(output).is_none());
     }
 }

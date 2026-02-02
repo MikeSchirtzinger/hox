@@ -826,6 +826,7 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 model: model.into(),
                 backpressure_enabled: !no_backpressure,
                 max_tokens: 16000,
+                max_budget_usd: None,
             };
 
             // Create and run orchestrator
@@ -856,9 +857,9 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
             if !result.success {
                 println!();
                 println!("Final backpressure status:");
-                println!("  Tests: {}", if result.final_status.tests_passed { "PASSED" } else { "FAILED" });
-                println!("  Lints: {}", if result.final_status.lints_passed { "PASSED" } else { "FAILED" });
-                println!("  Builds: {}", if result.final_status.builds_passed { "PASSED" } else { "FAILED" });
+                for check in &result.final_status.checks {
+                    println!("  {}: {}", check.name, if check.passed { "PASSED" } else { "FAILED" });
+                }
             }
         }
 
@@ -973,12 +974,7 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                     change_id: task.change_id.clone(),
                     iteration,
                     context: result.context.clone(),
-                    backpressure: Some(BackpressureResult {
-                        tests_passed: result.success,
-                        lints_passed: result.success,
-                        builds_passed: result.success,
-                        errors: Vec::new(),
-                    }),
+                    backpressure: Some(BackpressureResult::all_pass()),
                     files_touched: {
                         let mut files = state.files_touched.clone();
                         files.extend(result.files_created.clone());

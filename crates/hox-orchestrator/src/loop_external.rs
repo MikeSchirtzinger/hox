@@ -14,7 +14,7 @@ use hox_agent::{
     execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise,
     ExternalLoopResult, ExternalLoopState, Model,
 };
-use hox_core::{BackpressureStatus, HandoffContext, HoxError, Result, Task};
+use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
 use std::path::PathBuf;
 use tracing::{debug, info};
@@ -105,16 +105,24 @@ pub async fn run_external_iteration<E: JjExecutor>(
     // Run backpressure checks if enabled (with jj fix)
     let new_backpressure = if run_backpressure {
         let bp = run_all_checks_with_fix(workspace_path, executor, Some(&task.change_id)).await?;
-        info!(
-            "Backpressure: tests={}, lints={}, builds={}",
-            bp.tests_passed, bp.lints_passed, bp.builds_passed
-        );
+        for check in &bp.checks {
+            info!(
+                "  {} {}",
+                check.name,
+                if check.passed { "PASSED" } else { "FAILED" }
+            );
+        }
 
         // Update context with backpressure status
         updated_context.backpressure_status = Some(BackpressureStatus {
-            tests_passed: bp.tests_passed,
-            lints_passed: bp.lints_passed,
-            builds_passed: bp.builds_passed,
+            checks: bp
+                .checks
+                .iter()
+                .map(|c| CheckStatusEntry {
+                    name: c.name.clone(),
+                    passed: c.passed,
+                })
+                .collect(),
             last_errors: bp.errors.clone(),
         });
 

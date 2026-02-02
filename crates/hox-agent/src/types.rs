@@ -100,36 +100,65 @@ pub struct AnthropicContent {
     pub text: String,
 }
 
-/// Backpressure check results
+/// Severity of a check failure
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Severity {
+    /// Compilation errors, syntax errors - must fix
+    Breaking,
+    /// Lint warnings, style issues, test failures - nice to fix
+    Warning,
+}
+
+/// Outcome of a single backpressure check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckOutcome {
+    /// Human-readable name (e.g., "build", "lint", "test")
+    pub name: String,
+    /// Whether the check passed
+    pub passed: bool,
+    /// How severe a failure is
+    pub severity: Severity,
+    /// Error output (empty if passed)
+    pub output: String,
+}
+
+/// Backpressure check results - generalized for any project type
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackpressureResult {
-    pub tests_passed: bool,
-    pub lints_passed: bool,
-    pub builds_passed: bool,
+    /// Individual check outcomes
+    pub checks: Vec<CheckOutcome>,
+    /// Breaking errors only (filtered from failed checks)
     pub errors: Vec<String>,
 }
 
 impl BackpressureResult {
-    /// Check if all validations passed
+    /// Check if all checks passed
     pub fn all_passed(&self) -> bool {
-        self.tests_passed && self.lints_passed && self.builds_passed
+        self.checks.is_empty() || self.checks.iter().all(|c| c.passed)
     }
 
-    /// Create a result where everything passed
+    /// Create a result where everything passed (no checks run)
     pub fn all_pass() -> Self {
         Self {
-            tests_passed: true,
-            lints_passed: true,
-            builds_passed: true,
+            checks: Vec::new(),
             errors: Vec::new(),
         }
+    }
+
+    /// Get names of failed checks (for selective re-run)
+    pub fn failed_check_names(&self) -> Vec<&str> {
+        self.checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.name.as_str())
+            .collect()
     }
 }
 
 /// Configuration for the loop engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopConfig {
-    /// Maximum number of iterations before stopping
+    /// Maximum number of iterations before stopping. 0 = no limit.
     pub max_iterations: usize,
     /// Model to use for agent spawning
     pub model: Model,
@@ -137,15 +166,18 @@ pub struct LoopConfig {
     pub backpressure_enabled: bool,
     /// Maximum tokens for agent responses
     pub max_tokens: usize,
+    /// Budget cap per agent invocation in USD. None = no limit.
+    pub max_budget_usd: Option<f64>,
 }
 
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 20,
+            max_iterations: 0, // 0 = no limit
             model: Model::Sonnet,
             backpressure_enabled: true,
             max_tokens: 16000,
+            max_budget_usd: None,
         }
     }
 }
@@ -258,17 +290,45 @@ mod tests {
         assert!(result.all_passed());
 
         let result = BackpressureResult {
-            tests_passed: false,
-            ..BackpressureResult::all_pass()
+            checks: vec![CheckOutcome {
+                name: "build".into(),
+                passed: false,
+                severity: Severity::Breaking,
+                output: "error".into(),
+            }],
+            errors: vec!["error".into()],
         };
         assert!(!result.all_passed());
     }
 
     #[test]
+    fn test_failed_check_names() {
+        let result = BackpressureResult {
+            checks: vec![
+                CheckOutcome {
+                    name: "build".into(),
+                    passed: true,
+                    severity: Severity::Breaking,
+                    output: String::new(),
+                },
+                CheckOutcome {
+                    name: "lint".into(),
+                    passed: false,
+                    severity: Severity::Warning,
+                    output: "warning".into(),
+                },
+            ],
+            errors: Vec::new(),
+        };
+        assert_eq!(result.failed_check_names(), vec!["lint"]);
+    }
+
+    #[test]
     fn test_loop_config_default() {
         let config = LoopConfig::default();
-        assert_eq!(config.max_iterations, 20);
+        assert_eq!(config.max_iterations, 0); // 0 = no limit
         assert_eq!(config.model, Model::Sonnet);
         assert!(config.backpressure_enabled);
+        assert_eq!(config.max_budget_usd, None);
     }
 }
