@@ -176,6 +176,17 @@ impl<E: JjExecutor> RecoveryManager<E> {
             agent_name, snapshot_op_id
         );
 
+        // Count operations that will be undone (must happen BEFORE restore)
+        let current_ops = self.op_manager.recent_operations(100).await?;
+        let mut operations_undone = 0;
+
+        for op in &current_ops {
+            if op.id == snapshot_op_id {
+                break;
+            }
+            operations_undone += 1;
+        }
+
         // Restore to snapshot
         self.op_manager.restore(snapshot_op_id).await?;
 
@@ -199,17 +210,6 @@ impl<E: JjExecutor> RecoveryManager<E> {
         } else {
             false
         };
-
-        // Count operations undone
-        let current_ops = self.op_manager.recent_operations(100).await?;
-        let mut operations_undone = 0;
-
-        for op in &current_ops {
-            if op.id == snapshot_op_id {
-                break;
-            }
-            operations_undone += 1;
-        }
 
         Ok(RollbackResult {
             operations_undone,

@@ -449,7 +449,13 @@ fn format_check_output(
 ) -> String {
     let truncate = |s: &str, max: usize| -> String {
         if s.len() > max {
-            format!("{}...[truncated]", &s[..max])
+            // Find the nearest char boundary at or before max to avoid
+            // panicking on multi-byte UTF-8 sequences from compiler output
+            let mut boundary = max;
+            while boundary > 0 && !s.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            format!("{}...[truncated]", &s[..boundary])
         } else {
             s.to_string()
         }
