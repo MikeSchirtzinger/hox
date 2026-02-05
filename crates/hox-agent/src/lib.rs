@@ -16,7 +16,7 @@
 //!
 //! This prevents context compaction/drift that plagues long-running agents.
 
-mod artifact_manager;
+pub mod artifact_manager;
 mod auth;
 mod circuit_breaker;
 mod client;

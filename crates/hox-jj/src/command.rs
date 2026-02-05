@@ -58,9 +58,7 @@ impl JjCommand {
             .map_err(|e| HoxError::JjCommand(format!("Failed to run jj root: {}", e)))?;
 
         if !output.status.success() {
-            return Err(HoxError::JjCommand(
-                "Not in a jj repository".to_string(),
-            ));
+            return Err(HoxError::JjCommand("Not in a jj repository".to_string()));
         }
 
         let root = String::from_utf8_lossy(&output.stdout).trim().to_string();

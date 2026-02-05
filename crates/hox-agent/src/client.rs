@@ -125,7 +125,10 @@ pub async fn spawn_agent(
             retries += 1;
 
             if retries > MAX_RETRIES {
-                let error_text = response.text().await.unwrap_or_else(|_| "Unknown".to_string());
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown".to_string());
                 return Err(HoxError::ApiLimit(format!(
                     "Rate limit exceeded after {} retries. Last error: {}",
                     MAX_RETRIES, error_text
@@ -154,7 +157,10 @@ pub async fn spawn_agent(
 
         // Handle other errors
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown".to_string());
 
             // Retry on 5xx errors
             if status.is_server_error() && retries < MAX_RETRIES {

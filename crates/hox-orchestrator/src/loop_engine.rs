@@ -89,7 +89,8 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         let mut backpressure = BackpressureResult::all_pass();
 
         // Create recovery manager for rollback capability
-        let recovery_manager = RecoveryManager::new(self.executor.clone(), self.workspace_path.clone());
+        let recovery_manager =
+            RecoveryManager::new(self.executor.clone(), self.workspace_path.clone());
 
         let mut iteration: usize = 0;
         loop {
@@ -119,12 +120,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 // Log completion
                 if let Some(logger) = &self.activity_logger {
                     logger
-                        .log_loop_complete(
-                            iteration - 1,
-                            true,
-                            &total_usage,
-                            "All checks passed"
-                        )
+                        .log_loop_complete(iteration - 1, true, &total_usage, "All checks passed")
                         .await
                         .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
                 }
@@ -171,7 +167,10 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
 
             // Check if agent output is empty or broken
             if result.output.trim().is_empty() {
-                warn!("Agent iteration {} produced empty output, rolling back", iteration);
+                warn!(
+                    "Agent iteration {} produced empty output, rolling back",
+                    iteration
+                );
 
                 // Rollback to recovery point
                 let rollback_result = recovery_manager.restore_from(&recovery_point).await?;
@@ -211,15 +210,24 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             if let Some(new_context) = parse_context_update(&result.output) {
                 context = new_context;
                 context.loop_iteration = Some(iteration);
-                context.files_touched.extend(iteration_files_created.clone());
-                context.files_touched.extend(iteration_files_modified.clone());
+                context
+                    .files_touched
+                    .extend(iteration_files_created.clone());
+                context
+                    .files_touched
+                    .extend(iteration_files_modified.clone());
             }
 
             // Run backpressure checks (selective: only re-run previously failed)
             if self.config.backpressure_enabled {
                 backpressure = if iteration == 1 {
                     // First iteration: run all checks with jj fix to establish baseline
-                    run_all_checks_with_fix(&self.workspace_path, &self.executor, Some(&task.change_id)).await?
+                    run_all_checks_with_fix(
+                        &self.workspace_path,
+                        &self.executor,
+                        Some(&task.change_id),
+                    )
+                    .await?
                 } else {
                     // Subsequent: only re-run checks that failed last time
                     run_failed_checks(&self.workspace_path, &backpressure)?
@@ -261,7 +269,9 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                         &backpressure,
                     )
                     .await
-                    .map_err(|e| HoxError::Io(format!("Failed to log iteration completion: {}", e)))?;
+                    .map_err(|e| {
+                        HoxError::Io(format!("Failed to log iteration completion: {}", e))
+                    })?;
             }
 
             // Check for agent-requested stop (legacy format)
@@ -275,7 +285,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                             iteration,
                             backpressure.all_passed(),
                             &total_usage,
-                            "Agent requested stop"
+                            "Agent requested stop",
                         )
                         .await
                         .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
@@ -316,7 +326,10 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 if let Some(logger) = &self.activity_logger {
                     let reason_str = match &stop_reason {
                         StopReason::PromiseComplete => "Promise complete (all checks passed)",
-                        StopReason::PromiseCompleteWithChecks => "Promise complete (with validation checks)",
+                        StopReason::PromiseCompleteWithChecks => {
+                            "Promise complete (with validation checks)"
+                        }
+                        // Other stop reasons use default message
                         _ => "Promise complete",
                     };
                     logger
@@ -324,7 +337,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                             iteration,
                             backpressure.all_passed(),
                             &total_usage,
-                            reason_str
+                            reason_str,
                         )
                         .await
                         .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
@@ -352,7 +365,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                     self.config.max_iterations,
                     backpressure.all_passed(),
                     &total_usage,
-                    "Max iterations reached"
+                    "Max iterations reached",
                 )
                 .await
                 .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
@@ -410,13 +423,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         // Update via jj describe
         let output = self
             .executor
-            .exec(&[
-                "describe",
-                "-r",
-                &task.change_id,
-                "-m",
-                &description,
-            ])
+            .exec(&["describe", "-r", &task.change_id, "-m", &description])
             .await?;
 
         if !output.success {
@@ -464,11 +471,7 @@ fn parse_checklist(text: &str) -> Vec<String> {
 /// Parse a markdown list
 fn parse_list(text: &str) -> Vec<String> {
     text.lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("- ")
-                .map(|s| s.trim().to_string())
-        })
+        .filter_map(|line| line.trim().strip_prefix("- ").map(|s| s.trim().to_string()))
         .collect()
 }
 

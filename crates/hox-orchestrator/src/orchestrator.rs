@@ -1,6 +1,13 @@
 //! Core orchestrator implementation
 
 use hox_agent::LoopConfig;
+use std::time::Duration;
+
+/// Interval between status polls for child orchestrators
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Sleep interval in the main orchestrator poll loop
+const POLL_LOOP_INTERVAL: Duration = Duration::from_millis(500);
 use hox_core::{
     AgentId, ChangeId, ChildHandle, ChildStatus, DelegationPlan, DelegationStrategy, HoxError,
     HoxMetadata, MessageType, OrchestratorId, Phase, Result, Task, TaskStatus,
@@ -140,7 +147,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         // Create the orchestrator's base change
         let output = self
             .executor
-            .exec(&["new", "-m", &format!("Orchestrator {} base", self.config.id)])
+            .exec(&[
+                "new",
+                "-m",
+                &format!("Orchestrator {} base", self.config.id),
+            ])
             .await?;
 
         if !output.success {
@@ -194,15 +205,10 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         info!("Spawning agent {} for: {}", agent_name, task_description);
 
         // Create workspace for the agent
-        self.workspace_manager
-            .create_workspace(&agent_name)
-            .await?;
+        self.workspace_manager.create_workspace(&agent_name).await?;
 
         // Create a new change for the agent's work
-        let output = self
-            .executor
-            .exec(&["new", "-m", task_description])
-            .await?;
+        let output = self.executor.exec(&["new", "-m", task_description]).await?;
 
         if !output.success {
             return Err(HoxError::Agent(format!(
@@ -250,7 +256,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                     "-r",
                     change_id,
                     "-m",
-                    &format!("MUTATION: {}\n\n{}", content, MetadataManager::<E>::format_metadata(&metadata)),
+                    &format!(
+                        "MUTATION: {}\n\n{}",
+                        content,
+                        MetadataManager::<E>::format_metadata(&metadata)
+                    ),
                 ])
                 .await?;
 
@@ -297,15 +307,9 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         let mut events = watcher.watch().await?;
 
         // Main orchestration loop
-        while self.state == OrchestratorState::Running
-            || self.state == OrchestratorState::Waiting
-        {
+        while self.state == OrchestratorState::Running || self.state == OrchestratorState::Waiting {
             // Check for oplog events
-            if let Ok(Some(event)) = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                events.recv(),
-            )
-            .await
+            if let Ok(Some(event)) = tokio::time::timeout(CHILD_POLL_INTERVAL, events.recv()).await
             {
                 self.handle_oplog_event(event).await?;
             }
@@ -321,6 +325,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                         self.state = OrchestratorState::Failed(reason.clone());
                         break;
                     }
+                    // Pending and Active statuses continue waiting
                     _ => {}
                 }
             } else {
@@ -346,7 +351,6 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
     /// Handle an oplog event
     async fn handle_oplog_event(&mut self, event: OpLogEvent) -> Result<()> {
-
         match event {
             OpLogEvent::NewOperation {
                 operation_id,
@@ -359,6 +363,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             OpLogEvent::Error(e) => {
                 warn!("OpLog error: {}", e);
             }
+            // Other event types (future extensions) are logged but not handled
             _ => {}
         }
 
@@ -394,7 +399,10 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             // Check for conflicts and attempt resolution
             let conflicts = queries.conflicts().await?;
             if !conflicts.is_empty() {
-                warn!("Merge produced {} conflicts, attempting resolution", conflicts.len());
+                warn!(
+                    "Merge produced {} conflicts, attempting resolution",
+                    conflicts.len()
+                );
 
                 let resolver = crate::ConflictResolver::new(self.executor.clone());
                 let report = resolver.resolve_all().await?;
@@ -559,9 +567,9 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         // Create .hox directory if it doesn't exist
         let hox_dir = self.config.repo_root.join(".hox");
-        tokio::fs::create_dir_all(&hox_dir).await.map_err(|e| {
-            HoxError::Io(format!("Failed to create .hox directory: {}", e))
-        })?;
+        tokio::fs::create_dir_all(&hox_dir)
+            .await
+            .map_err(|e| HoxError::Io(format!("Failed to create .hox directory: {}", e)))?;
 
         let mut loop_engine = LoopEngine::new(
             self.executor.clone(),
@@ -619,7 +627,10 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         for (child_id, handle) in &self.children {
             // Skip already completed/failed children
-            if matches!(handle.status, ChildStatus::Completed | ChildStatus::Failed(_)) {
+            if matches!(
+                handle.status,
+                ChildStatus::Completed | ChildStatus::Failed(_)
+            ) {
                 continue;
             }
 
@@ -695,23 +706,34 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         while self.has_active_children() {
             // Timeout guard
             if delegation_start.elapsed() >= max_delegation_duration || poll_count >= max_polls {
-                let active: Vec<_> = self.children.iter()
-                    .filter(|(_, h)| matches!(h.status, ChildStatus::Running | ChildStatus::Spawning))
+                let active: Vec<_> = self
+                    .children
+                    .iter()
+                    .filter(|(_, h)| {
+                        matches!(h.status, ChildStatus::Running | ChildStatus::Spawning)
+                    })
                     .map(|(id, _)| id.to_string())
                     .collect();
                 warn!(
                     "Delegation timeout after {:?} ({} polls). Active children: {:?}",
-                    delegation_start.elapsed(), poll_count, active
+                    delegation_start.elapsed(),
+                    poll_count,
+                    active
                 );
                 // Mark remaining active children as failed
-                let active_ids: Vec<_> = self.children.iter()
-                    .filter(|(_, h)| matches!(h.status, ChildStatus::Running | ChildStatus::Spawning))
+                let active_ids: Vec<_> = self
+                    .children
+                    .iter()
+                    .filter(|(_, h)| {
+                        matches!(h.status, ChildStatus::Running | ChildStatus::Spawning)
+                    })
                     .map(|(id, _)| id.clone())
                     .collect();
                 for child_id in active_ids {
-                    self.update_child_status(&child_id, ChildStatus::Failed(
-                        "Timed out after 30 minutes".to_string()
-                    ));
+                    self.update_child_status(
+                        &child_id,
+                        ChildStatus::Failed("Timed out after 30 minutes".to_string()),
+                    );
                 }
                 break;
             }
@@ -727,12 +749,13 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                     ChildStatus::Failed(reason) => {
                         warn!("Child {} failed: {}", child_id, reason);
                     }
+                    // Spawning and Running statuses don't need special logging here
                     _ => {}
                 }
             }
 
             // Small delay to avoid busy-waiting
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(POLL_LOOP_INTERVAL).await;
             poll_count += 1;
         }
 
@@ -884,8 +907,8 @@ mod tests {
 
     #[test]
     fn test_orchestrator_config() {
-        let config = OrchestratorConfig::new(OrchestratorId::root(), "/tmp/repo")
-            .with_max_agents(8);
+        let config =
+            OrchestratorConfig::new(OrchestratorId::root(), "/tmp/repo").with_max_agents(8);
 
         assert_eq!(config.id.to_string(), "O-A-1");
         assert_eq!(config.max_agents, 8);
@@ -894,7 +917,10 @@ mod tests {
     #[test]
     fn test_delegation_strategy_default() {
         let config = OrchestratorConfig::new(OrchestratorId::root(), "/tmp/repo");
-        assert!(matches!(config.delegation_strategy, DelegationStrategy::None));
+        assert!(matches!(
+            config.delegation_strategy,
+            DelegationStrategy::None
+        ));
     }
 
     #[test]
@@ -937,7 +963,10 @@ mod tests {
         assert!(matches!(plans[2], DelegationPlan::Local { phase: 2 }));
 
         // Verify the config has None strategy
-        assert!(matches!(config.delegation_strategy, DelegationStrategy::None));
+        assert!(matches!(
+            config.delegation_strategy,
+            DelegationStrategy::None
+        ));
     }
 
     #[test]

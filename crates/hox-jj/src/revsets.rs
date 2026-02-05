@@ -19,7 +19,14 @@ impl<E: JjExecutor> RevsetQueries<E> {
     pub async fn query(&self, revset: &str) -> Result<Vec<ChangeId>> {
         let output = self
             .executor
-            .exec(&["log", "-r", revset, "-T", "change_id ++ \"\\n\"", "--no-graph"])
+            .exec(&[
+                "log",
+                "-r",
+                revset,
+                "-T",
+                "change_id ++ \"\\n\"",
+                "--no-graph",
+            ])
             .await?;
 
         Ok(parse_change_ids(&output))
@@ -67,8 +74,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
 
     /// Find mutation messages (structural decisions from orchestrators)
     pub async fn mutations(&self) -> Result<Vec<ChangeId>> {
-        self.query("description(glob:\"Msg-Type: mutation\")")
-            .await
+        self.query("description(glob:\"Msg-Type: mutation\")").await
     }
 
     /// Find alignment requests
@@ -343,7 +349,10 @@ mod tests {
         );
 
         let queries = RevsetQueries::new(executor);
-        let result = queries.blocking_conflicts(&"abc123".to_string()).await.unwrap();
+        let result = queries
+            .blocking_conflicts(&"abc123".to_string())
+            .await
+            .unwrap();
 
         assert_eq!(result, vec!["conflict1"]);
     }
@@ -428,7 +437,10 @@ mod tests {
         );
 
         let queries = RevsetQueries::new(executor);
-        let result = queries.connected_component(&"abc123".to_string()).await.unwrap();
+        let result = queries
+            .connected_component(&"abc123".to_string())
+            .await
+            .unwrap();
 
         assert_eq!(result, vec!["abc123", "def456", "ghi789"]);
     }

@@ -64,9 +64,7 @@ impl AgentTableWidget {
             .collect();
 
         // Render table
-        let table = Table::new(rows, widths)
-            .header(header)
-            .column_spacing(1);
+        let table = Table::new(rows, widths).header(header).column_spacing(1);
 
         Widget::render(table, inner, buf);
     }
@@ -84,7 +82,8 @@ impl AgentTableWidget {
         Row::new(vec![
             Cell::from(agent_name).style(Style::default().fg(Color::White)),
             Cell::from(task).style(Style::default().fg(Color::Gray)),
-            Cell::from(progress_bar).style(Style::default().fg(Self::progress_color(agent.progress))),
+            Cell::from(progress_bar)
+                .style(Style::default().fg(Self::progress_color(agent.progress))),
             Cell::from(status).style(Style::default().fg(status_color)),
             Cell::from(duration).style(Style::default().fg(Color::Cyan)),
         ])
@@ -123,7 +122,6 @@ impl AgentTableWidget {
             Color::Red
         }
     }
-
 
     /// Render with detailed view (more columns)
     pub fn render_detailed(state: &DashboardState, area: Rect, buf: &mut Buffer) {
@@ -181,9 +179,7 @@ impl AgentTableWidget {
             .collect();
 
         // Render table
-        let table = Table::new(rows, widths)
-            .header(header)
-            .column_spacing(1);
+        let table = Table::new(rows, widths).header(header).column_spacing(1);
 
         Widget::render(table, inner, buf);
     }
@@ -210,7 +206,8 @@ impl AgentTableWidget {
         Row::new(vec![
             Cell::from(agent_name).style(Style::default().fg(Color::White)),
             Cell::from(task).style(Style::default().fg(Color::Gray)),
-            Cell::from(progress_bar).style(Style::default().fg(Self::progress_color(agent.progress))),
+            Cell::from(progress_bar)
+                .style(Style::default().fg(Self::progress_color(agent.progress))),
             Cell::from(status).style(Style::default().fg(status_color)),
             Cell::from(duration).style(Style::default().fg(Color::Cyan)),
             Cell::from(calls).style(Style::default().fg(Color::Blue)),
@@ -234,10 +231,7 @@ mod tests {
 
     #[test]
     fn test_truncate_text() {
-        assert_eq!(
-            AgentTableWidget::truncate_text("Short", 10),
-            "Short"
-        );
+        assert_eq!(AgentTableWidget::truncate_text("Short", 10), "Short");
         assert_eq!(
             AgentTableWidget::truncate_text("This is a very long text", 10),
             "This is a…"

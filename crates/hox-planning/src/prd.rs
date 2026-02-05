@@ -1,14 +1,14 @@
 //! Product Requirements Document (PRD) data structures
 
-use serde::{Deserialize, Serialize};
 use hox_core::Priority;
+use serde::{Deserialize, Serialize};
 
 /// A complete Product Requirements Document
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRequirementsDocument {
     pub project_name: String,
     pub version: String,
-    pub status: String,  // "draft", "approved", "in_progress"
+    pub status: String, // "draft", "approved", "in_progress"
     pub last_updated: String,
     pub goals: GoalsSection,
     pub requirements: RequirementsSection,
@@ -33,7 +33,7 @@ pub struct RequirementsSection {
 /// A single requirement
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Requirement {
-    pub id: String,      // "FR1", "NFR2"
+    pub id: String, // "FR1", "NFR2"
     pub statement: String,
     pub description: Option<String>,
 }

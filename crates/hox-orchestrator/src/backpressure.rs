@@ -24,6 +24,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Maximum total characters of error output to include in the agent prompt.
 const MAX_ERROR_PROMPT_CHARS: usize = 6000;
 
+/// Maximum characters for stdout/stderr in error messages
+const MAX_STDIO_CHARS: usize = 4000;
+
 /// A configured check command
 #[derive(Debug, Clone)]
 pub struct CheckCommand {
@@ -85,10 +88,7 @@ pub fn run_failed_checks(
 }
 
 /// Run a set of check commands in parallel with timeouts
-pub fn run_checks(
-    workspace_path: &Path,
-    commands: &[CheckCommand],
-) -> Result<BackpressureResult> {
+pub fn run_checks(workspace_path: &Path, commands: &[CheckCommand]) -> Result<BackpressureResult> {
     if commands.is_empty() {
         return Ok(BackpressureResult::all_pass());
     }
@@ -107,16 +107,14 @@ pub fn run_checks(
 
         handles
             .into_iter()
-            .map(|h| {
-                match h.join() {
-                    Ok(outcome) => outcome,
-                    Err(_) => CheckOutcome {
-                        name: "unknown".into(),
-                        passed: false,
-                        severity: Severity::Breaking,
-                        output: "Check thread panicked".into(),
-                    },
-                }
+            .map(|h| match h.join() {
+                Ok(outcome) => outcome,
+                Err(_) => CheckOutcome {
+                    name: "unknown".into(),
+                    passed: false,
+                    severity: Severity::Breaking,
+                    output: "Check thread panicked".into(),
+                },
             })
             .collect()
     });
@@ -166,12 +164,7 @@ pub fn detect_checks(workspace_path: &Path) -> Vec<CheckCommand> {
         checks.push(CheckCommand {
             name: "lint".into(),
             program: "cargo".into(),
-            args: vec![
-                "clippy".into(),
-                "--".into(),
-                "-D".into(),
-                "warnings".into(),
-            ],
+            args: vec!["clippy".into(), "--".into(), "-D".into(), "warnings".into()],
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             severity: Severity::Warning,
         });
@@ -185,8 +178,7 @@ pub fn detect_checks(workspace_path: &Path) -> Vec<CheckCommand> {
     }
 
     // Python
-    if workspace_path.join("pyproject.toml").exists()
-        || workspace_path.join("pytest.ini").exists()
+    if workspace_path.join("pyproject.toml").exists() || workspace_path.join("pytest.ini").exists()
     {
         let ruff = python_tool(workspace_path, "ruff");
         checks.push(CheckCommand {
@@ -340,7 +332,10 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
                 name: cmd.name.clone(),
                 passed: true,
                 severity: Severity::Warning,
-                output: format!("[SKIPPED] {} not found on PATH - {} check not run", cmd.program, cmd.name),
+                output: format!(
+                    "[SKIPPED] {} not found on PATH - {} check not run",
+                    cmd.program, cmd.name
+                ),
             };
         }
         Err(e) => {
@@ -360,14 +355,18 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
     let stdout_thread = std::thread::spawn(move || {
         let mut s = String::new();
         if let Some(mut h) = stdout_handle {
-            let _ = h.read_to_string(&mut s);
+            if let Err(e) = h.read_to_string(&mut s) {
+                tracing::warn!("Failed to read stdout: {}", e);
+            }
         }
         s
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut s = String::new();
         if let Some(mut h) = stderr_handle {
-            let _ = h.read_to_string(&mut s);
+            if let Err(e) = h.read_to_string(&mut s) {
+                tracing::warn!("Failed to read stderr: {}", e);
+            }
         }
         s
     });
@@ -380,8 +379,12 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap
+                    if let Err(e) = child.kill() {
+                        tracing::warn!("Failed to kill child process: {}", e);
+                    }
+                    if let Err(e) = child.wait() {
+                        tracing::warn!("Failed to wait for child process: {}", e);
+                    }
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -389,8 +392,12 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
             Err(e) => {
                 tracing::warn!("Error polling {} process: {}", cmd.name, e);
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if let Err(e) = child.kill() {
+                        tracing::warn!("Failed to kill child process: {}", e);
+                    }
+                    if let Err(e) = child.wait() {
+                        tracing::warn!("Failed to wait for child process: {}", e);
+                    }
                     break None;
                 }
                 // Transient error, retry
@@ -453,8 +460,8 @@ fn format_check_output(
         name,
         program,
         args.join(" "),
-        truncate(stdout.trim(), 4000),
-        truncate(stderr.trim(), 4000)
+        truncate(stdout.trim(), MAX_STDIO_CHARS),
+        truncate(stderr.trim(), MAX_STDIO_CHARS)
     )
 }
 

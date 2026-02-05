@@ -136,7 +136,9 @@ pub fn build_iteration_prompt(
 
     // Completion signal instructions
     prompt.push_str("\n## COMPLETION SIGNAL\n\n");
-    prompt.push_str("When the task is fully complete and all validation checks pass, signal completion:\n\n");
+    prompt.push_str(
+        "When the task is fully complete and all validation checks pass, signal completion:\n\n",
+    );
     prompt.push_str("<promise>COMPLETE</promise>\n\n");
     prompt.push_str("Optionally include reasoning for completion:\n\n");
     prompt.push_str("<completion_reasoning>\n");
@@ -155,7 +157,9 @@ pub fn parse_context_update(output: &str) -> Option<HandoffContext> {
     let content_start = start + "```context".len();
 
     // Find the closing ``` after the opening tag
-    let end = output[content_start..].find("```").map(|e| content_start + e)?;
+    let end = output[content_start..]
+        .find("```")
+        .map(|e| content_start + e)?;
 
     if end <= content_start {
         return None;

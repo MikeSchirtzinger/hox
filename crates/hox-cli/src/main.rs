@@ -2,11 +2,11 @@
 //!
 //! Usage:
 //!   hox init                    Initialize Hox in current repo
-//!   hox orchestrate <plan>      Run orchestration on a plan
+//!   hox orchestrate `<plan>`    Run orchestration on a plan
 //!   hox status                  Show orchestration status
 //!   hox patterns list           List learned patterns
-//!   hox patterns propose <file> Propose a new pattern
-//!   hox validate <change>       Run validation on a change
+//!   hox patterns propose `<file>` Propose a new pattern
+//!   hox validate `<change>`     Run validation on a change
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -15,8 +15,8 @@ use hox_core::{DelegationStrategy, HandoffContext, OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
 use hox_jj::{BookmarkManager, JjCommand, JjExecutor, MetadataManager, RevsetQueries};
 use hox_orchestrator::{
-    create_initial_state, load_state, run_external_iteration, save_state, Orchestrator,
-    OrchestratorConfig, PhaseManager,
+    create_initial_state, load_state, run_external_iteration, save_state, ExternalIterationConfig,
+    Orchestrator, OrchestratorConfig, PhaseManager,
 };
 use hox_planning::{cli_tool_prd, example_prd, PrdDecomposer, ProjectRequirementsDocument};
 use hox_validation::{ByzantineConsensus, ConsensusConfig, Validator, ValidatorConfig};
@@ -395,7 +395,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Setup logging
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
+    let level = if cli.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
@@ -403,7 +407,12 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     match cli.command {
-        Commands::Init { path, prd, from_prd, cli_tool } => cmd_init(path, prd, from_prd, cli_tool).await,
+        Commands::Init {
+            path,
+            prd,
+            from_prd,
+            cli_tool,
+        } => cmd_init(path, prd, from_prd, cli_tool).await,
         Commands::Orchestrate {
             plan,
             orchestrators,
@@ -433,7 +442,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool: bool) -> Result<()> {
+async fn cmd_init(
+    path: PathBuf,
+    prd: bool,
+    from_prd: Option<PathBuf>,
+    cli_tool: bool,
+) -> Result<()> {
     info!("Initializing Hox in {:?}", path);
 
     // Create .hox directory structure
@@ -472,10 +486,11 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     // Handle PRD generation/loading
     let prd_doc = if let Some(prd_file) = from_prd {
         // Load existing PRD from file
-        let content = tokio::fs::read_to_string(&prd_file).await
+        let content = tokio::fs::read_to_string(&prd_file)
+            .await
             .context("Failed to read PRD file")?;
-        let doc: ProjectRequirementsDocument = serde_json::from_str(&content)
-            .context("Failed to parse PRD JSON")?;
+        let doc: ProjectRequirementsDocument =
+            serde_json::from_str(&content).context("Failed to parse PRD JSON")?;
 
         println!("\nLoaded PRD from: {:?}", prd_file);
         Some(doc)
@@ -483,7 +498,8 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
         // Generate new PRD based on template
         let doc = if cli_tool {
             // Extract project name from current directory
-            let project_name = path.file_name()
+            let project_name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("my-cli-tool");
             cli_tool_prd(project_name)
@@ -501,11 +517,7 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     if let Some(doc) = prd_doc {
         // Save PRD to .hox/prd.json
         let prd_path = hox_dir.join("prd.json");
-        tokio::fs::write(
-            &prd_path,
-            serde_json::to_string_pretty(&doc)?,
-        )
-        .await?;
+        tokio::fs::write(&prd_path, serde_json::to_string_pretty(&doc)?).await?;
 
         println!("  .hox/prd.json");
 
@@ -544,15 +556,22 @@ async fn cmd_init(path: PathBuf, prd: bool, from_prd: Option<PathBuf>, cli_tool:
     Ok(())
 }
 
-async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: usize, delegate: bool) -> Result<()> {
+async fn cmd_orchestrate(
+    plan: String,
+    orchestrator_count: usize,
+    max_agents: usize,
+    delegate: bool,
+) -> Result<()> {
     info!("Starting orchestration: {}", plan);
 
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
 
     for i in 0..orchestrator_count {
         let id = OrchestratorId::new('A', (i + 1) as u32);
-        let mut config = OrchestratorConfig::new(id.clone(), jj.repo_root())
-            .with_max_agents(max_agents);
+        let mut config =
+            OrchestratorConfig::new(id.clone(), jj.repo_root()).with_max_agents(max_agents);
 
         if delegate {
             config = config.with_delegation_strategy(DelegationStrategy::PhasePerChild);
@@ -577,9 +596,11 @@ async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: us
         }
     }
 
-    println!("Orchestration {} with {} orchestrator(s)",
+    println!(
+        "Orchestration {} with {} orchestrator(s)",
         if delegate { "completed" } else { "started" },
-        orchestrator_count);
+        orchestrator_count
+    );
     if !delegate {
         println!("Use 'hox status' to check progress");
     }
@@ -588,7 +609,9 @@ async fn cmd_orchestrate(plan: String, orchestrator_count: usize, max_agents: us
 }
 
 async fn cmd_status() -> Result<()> {
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let queries = RevsetQueries::new(jj);
 
     println!("Hox Status");
@@ -597,7 +620,11 @@ async fn cmd_status() -> Result<()> {
     // Find orchestrators - try bookmark query first, fallback to description search
     let orchestrators = match queries.all_orchestrators_by_bookmark().await {
         Ok(orcks) => orcks,
-        Err(_) => queries.query("description(glob:\"Orchestrator: O-*\")").await?,
+        Err(_) => {
+            queries
+                .query("description(glob:\"Orchestrator: O-*\")")
+                .await?
+        }
     };
     println!("\nOrchestrators: {}", orchestrators.len());
 
@@ -611,7 +638,10 @@ async fn cmd_status() -> Result<()> {
 
     // Find parallelizable tasks (Phase 6 power query)
     let parallelizable = queries.parallelizable_tasks().await?;
-    println!("Parallelizable (independent heads): {}", parallelizable.len());
+    println!(
+        "Parallelizable (independent heads): {}",
+        parallelizable.len()
+    );
 
     // Find empty/abandoned changes (Phase 6 power query)
     let empty = queries.empty_changes().await?;
@@ -736,7 +766,9 @@ async fn cmd_validate(change: String, validator_count: usize) -> Result<()> {
 }
 
 async fn cmd_query(revset: String) -> Result<()> {
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let queries = RevsetQueries::new(jj);
 
     let changes = queries.query(&revset).await?;
@@ -760,7 +792,9 @@ async fn cmd_set(
     agent: Option<String>,
     orchestrator: Option<String>,
 ) -> Result<()> {
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let queries = RevsetQueries::new(jj.clone());
 
     let change_id = queries
@@ -795,7 +829,9 @@ async fn cmd_set(
 }
 
 async fn cmd_loop(action: LoopCommands) -> Result<()> {
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
 
     match action {
         LoopCommands::Start {
@@ -837,7 +873,14 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
             println!("  Task: {}", task.description.lines().next().unwrap_or(""));
             println!("  Model: {:?}", model);
             println!("  Max iterations: {}", max_iterations);
-            println!("  Backpressure: {}", if no_backpressure { "disabled" } else { "enabled" });
+            println!(
+                "  Backpressure: {}",
+                if no_backpressure {
+                    "disabled"
+                } else {
+                    "enabled"
+                }
+            );
             println!();
 
             let result = orchestrator.run_loop(task, Some(config)).await?;
@@ -858,7 +901,11 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 println!();
                 println!("Final backpressure status:");
                 for check in &result.final_status.checks {
-                    println!("  {}: {}", check.name, if check.passed { "PASSED" } else { "FAILED" });
+                    println!(
+                        "  {}: {}",
+                        check.name,
+                        if check.passed { "PASSED" } else { "FAILED" }
+                    );
                 }
             }
         }
@@ -944,25 +991,28 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 .context("Failed to deserialize context from state")?;
 
             // Get backpressure from state or create initial
-            let backpressure = state.backpressure.unwrap_or_else(BackpressureResult::all_pass);
+            let backpressure = state
+                .backpressure
+                .unwrap_or_else(BackpressureResult::all_pass);
 
             // Next iteration number
             let iteration = state.iteration + 1;
 
-            // Run single iteration
-            let result = run_external_iteration(
-                &task,
-                &context,
-                &backpressure,
+            // Build iteration config
+            let config = ExternalIterationConfig {
+                task: &task,
+                context: &context,
+                backpressure: &backpressure,
                 iteration,
                 max_iterations,
-                model.into(),
+                model: model.into(),
                 max_tokens,
-                jj.repo_root(),
-                &jj,
-                !no_backpressure,
-            )
-            .await?;
+                workspace_path: jj.repo_root().to_path_buf(),
+                run_backpressure: !no_backpressure,
+            };
+
+            // Run single iteration
+            let result = run_external_iteration(&config, &jj).await?;
 
             // Output result as JSON to stdout
             let json = serde_json::to_string_pretty(&result)?;
@@ -1007,7 +1057,9 @@ async fn cmd_dashboard(refresh_ms: u64, max_oplog: usize) -> Result<()> {
 }
 
 async fn cmd_bookmark(action: BookmarkCommands) -> Result<()> {
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let bookmark_manager = BookmarkManager::new(jj.clone());
 
     match action {
@@ -1028,7 +1080,11 @@ async fn cmd_bookmark(action: BookmarkCommands) -> Result<()> {
         }
 
         BookmarkCommands::List { pattern } => {
-            let pattern_opt = if pattern == "*" { None } else { Some(pattern.as_str()) };
+            let pattern_opt = if pattern == "*" {
+                None
+            } else {
+                Some(pattern.as_str())
+            };
             let bookmarks = bookmark_manager.list(pattern_opt).await?;
 
             if bookmarks.is_empty() {
@@ -1039,7 +1095,10 @@ async fn cmd_bookmark(action: BookmarkCommands) -> Result<()> {
             println!("Bookmarks:");
             for bookmark in bookmarks {
                 if let Some(tracking) = bookmark.tracking {
-                    println!("  {} -> {} (tracking: {})", bookmark.name, bookmark.change_id, tracking);
+                    println!(
+                        "  {} -> {} (tracking: {})",
+                        bookmark.name, bookmark.change_id, tracking
+                    );
                 } else {
                     println!("  {} -> {}", bookmark.name, bookmark.change_id);
                 }
@@ -1087,7 +1146,9 @@ async fn cmd_rollback(
 ) -> Result<()> {
     use hox_orchestrator::RecoveryManager;
 
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let recovery_manager = RecoveryManager::new(jj.clone(), jj.repo_root().to_path_buf());
 
     // Determine rollback mode
@@ -1159,7 +1220,7 @@ async fn cmd_rollback(
             println!("  hox rollback --agent <name> --operation <op-id> # Rollback agent work");
         }
 
-        // Invalid combinations
+        // Invalid combinations (e.g., agent without operation, count with agent, etc.)
         _ => {
             anyhow::bail!("Invalid rollback options. Use --help for usage information.");
         }
@@ -1171,7 +1232,9 @@ async fn cmd_rollback(
 async fn cmd_dag(action: DagCommands) -> Result<()> {
     use hox_jj::DagOperations;
 
-    let jj = JjCommand::detect().await.context("Not in a JJ repository")?;
+    let jj = JjCommand::detect()
+        .await
+        .context("Not in a JJ repository")?;
     let dag_ops = DagOperations::new(jj);
 
     match action {
@@ -1203,9 +1266,7 @@ async fn cmd_dag(action: DagCommands) -> Result<()> {
                 Some(paths.iter().map(|s| s.as_str()).collect())
             };
 
-            let result = dag_ops
-                .absorb(paths_refs.as_deref())
-                .await?;
+            let result = dag_ops.absorb(paths_refs.as_deref()).await?;
 
             println!("Absorb complete:");
             println!("  Hunks absorbed: {}", result.hunks_absorbed);
@@ -1272,11 +1333,17 @@ async fn cmd_dag(action: DagCommands) -> Result<()> {
                     into
                 );
             } else {
-                println!("Squash complete: moved all changes from {} to {}", from, into);
+                println!(
+                    "Squash complete: moved all changes from {} to {}",
+                    from, into
+                );
             }
         }
 
-        DagCommands::Duplicate { change_id, destination } => {
+        DagCommands::Duplicate {
+            change_id,
+            destination,
+        } => {
             info!("Duplicating change {}", change_id);
             println!("Duplicating change {}...", change_id);
 
@@ -1302,7 +1369,10 @@ async fn cmd_dag(action: DagCommands) -> Result<()> {
             println!("Backout complete:");
             println!("  Original change: {}", change_id);
             println!("  Backout change ID: {}", backout_id);
-            println!("\nThis change reverses the effects of {} without destructive history editing.", change_id);
+            println!(
+                "\nThis change reverses the effects of {} without destructive history editing.",
+                change_id
+            );
         }
 
         DagCommands::Evolog { change_id } => {

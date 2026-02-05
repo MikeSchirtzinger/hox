@@ -81,9 +81,8 @@ impl<E: JjExecutor> MetadataManager<E> {
         // Check for trailers at the beginning (before first blank line that appears AFTER content starts)
         if let Some(first_content) = first_non_empty {
             // Find first blank line that comes after the first content line
-            let first_blank_after_content = blank_positions
-                .iter()
-                .find(|&&pos| pos > first_content);
+            let first_blank_after_content =
+                blank_positions.iter().find(|&&pos| pos > first_content);
 
             if let Some(&first_blank) = first_blank_after_content {
                 trailer_ranges.push(first_content..first_blank);
@@ -279,7 +278,8 @@ Msg-Type: mutation
             .with_status(TaskStatus::Open)
             .with_orchestrator("O-A-1");
 
-        let formatted = MetadataManager::<crate::command::MockJjExecutor>::format_metadata(&metadata);
+        let formatted =
+            MetadataManager::<crate::command::MockJjExecutor>::format_metadata(&metadata);
 
         assert!(formatted.contains("Priority: critical"));
         assert!(formatted.contains("Status: open"));

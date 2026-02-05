@@ -240,7 +240,10 @@ The implementation is ready for review.
     fn test_raw_block_capture() {
         let output = "<promise>COMPLETE</promise>";
         let promise = CompletionPromise::parse(output);
-        assert_eq!(promise.raw_block, Some("<promise>COMPLETE</promise>".to_string()));
+        assert_eq!(
+            promise.raw_block,
+            Some("<promise>COMPLETE</promise>".to_string())
+        );
     }
 
     #[test]

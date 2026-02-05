@@ -123,7 +123,10 @@ pub fn cli_tool_prd(tool_name: impl Into<String>) -> ProjectRequirementsDocument
                 "Provide excellent user experience".to_string(),
                 "Ensure reliability and error handling".to_string(),
             ],
-            background: format!("This CLI tool will provide command-line functionality for {}.", name),
+            background: format!(
+                "This CLI tool will provide command-line functionality for {}.",
+                name
+            ),
             timeline_estimate: Some("1 week".to_string()),
         },
         requirements: RequirementsSection {
@@ -152,28 +155,24 @@ pub fn cli_tool_prd(tool_name: impl Into<String>) -> ProjectRequirementsDocument
                 },
             ],
         },
-        epics: vec![
-            Epic {
-                id: "Epic-1".to_string(),
-                name: "CLI Foundation".to_string(),
-                description: "Build the CLI foundation with argument parsing".to_string(),
-                priority: Priority::Critical,
-                stories: vec![
-                    Story {
-                        id: "1.1".to_string(),
-                        title: "Setup CLI structure".to_string(),
-                        as_a: "user".to_string(),
-                        i_want: "a working CLI skeleton".to_string(),
-                        so_that: "the tool can be invoked from command line".to_string(),
-                        acceptance_criteria: vec![
-                            "CLI compiles and runs".to_string(),
-                            "Help text displays correctly".to_string(),
-                            "Version flag works".to_string(),
-                        ],
-                    },
+        epics: vec![Epic {
+            id: "Epic-1".to_string(),
+            name: "CLI Foundation".to_string(),
+            description: "Build the CLI foundation with argument parsing".to_string(),
+            priority: Priority::Critical,
+            stories: vec![Story {
+                id: "1.1".to_string(),
+                title: "Setup CLI structure".to_string(),
+                as_a: "user".to_string(),
+                i_want: "a working CLI skeleton".to_string(),
+                so_that: "the tool can be invoked from command line".to_string(),
+                acceptance_criteria: vec![
+                    "CLI compiles and runs".to_string(),
+                    "Help text displays correctly".to_string(),
+                    "Version flag works".to_string(),
                 ],
-            },
-        ],
+            }],
+        }],
     }
 }
 

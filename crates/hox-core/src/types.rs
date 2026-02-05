@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Task priority levels (matches jj-dev enhancement)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Critical = 0,
@@ -216,7 +218,12 @@ impl std::fmt::Display for AgentId {
         if let Some(name) = &self.name {
             write!(f, "{}/{}", self.orchestrator, name)
         } else {
-            write!(f, "{}/agent-{}", self.orchestrator, &self.id.to_string()[..8])
+            write!(
+                f,
+                "{}/agent-{}",
+                self.orchestrator,
+                &self.id.to_string()[..8]
+            )
         }
     }
 }

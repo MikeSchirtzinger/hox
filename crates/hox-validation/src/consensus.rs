@@ -64,10 +64,7 @@ pub enum ConsensusResult {
         reasons: Vec<String>,
     },
     /// Not enough validators
-    InsufficientValidators {
-        have: usize,
-        need: usize,
-    },
+    InsufficientValidators { have: usize, need: usize },
     /// No consensus reached
     NoConsensus {
         votes_for: usize,
@@ -144,9 +141,7 @@ impl ByzantineConsensus {
                         if !check.passed {
                             fail_reasons.push(format!(
                                 "{}: {:?} - {}",
-                                vote.validator_id,
-                                check.check,
-                                check.details
+                                vote.validator_id, check.check, check.details
                             ));
                         }
                     }
@@ -208,7 +203,12 @@ mod tests {
     use super::*;
     use crate::validator::ValidationReport;
 
-    fn make_vote(validator_id: &str, change_id: &str, result: ValidationResult, score: f32) -> Vote {
+    fn make_vote(
+        validator_id: &str,
+        change_id: &str,
+        result: ValidationResult,
+        score: f32,
+    ) -> Vote {
         Vote {
             validator_id: validator_id.to_string(),
             change_id: change_id.to_string(),

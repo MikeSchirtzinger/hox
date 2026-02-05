@@ -19,18 +19,11 @@ pub enum TelemetryEvent {
         duration_ms: u64,
     },
     /// Status changed
-    StatusChange {
-        from: TaskStatus,
-        to: TaskStatus,
-    },
+    StatusChange { from: TaskStatus, to: TaskStatus },
     /// Alignment requested
-    AlignmentRequested {
-        topic: String,
-    },
+    AlignmentRequested { topic: String },
     /// Mutation conflict encountered
-    MutationConflict {
-        mutation_source: String,
-    },
+    MutationConflict { mutation_source: String },
     /// Custom event
     Custom {
         name: String,
@@ -84,6 +77,7 @@ impl AgentMetrics {
             TelemetryEvent::MutationConflict { .. } => {
                 self.telemetry.mutation_conflicts += 1;
             }
+            // StatusChange and Custom events are logged but don't affect counters
             _ => {}
         }
 
@@ -129,10 +123,7 @@ impl MetricsCollector {
     /// Start tracking an agent
     pub async fn start_agent(&self, agent_id: &str, change_id: &str) {
         let mut agents = self.agents.write().await;
-        agents.insert(
-            agent_id.to_string(),
-            AgentMetrics::new(agent_id, change_id),
-        );
+        agents.insert(agent_id.to_string(), AgentMetrics::new(agent_id, change_id));
         debug!("Started tracking agent {}", agent_id);
     }
 
@@ -145,6 +136,7 @@ impl MetricsCollector {
                 self.total_failures.fetch_add(1, Ordering::Relaxed);
             }
         }
+        // StatusChange, AlignmentRequested, MutationConflict, Custom events don't affect global counters
 
         // Update agent metrics
         let mut agents = self.agents.write().await;

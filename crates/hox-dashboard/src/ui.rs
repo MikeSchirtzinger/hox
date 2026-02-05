@@ -47,30 +47,31 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     // Title
-    let title = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("HOX DASHBOARD", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(
-                format!("Session: {}", app.state.session.id),
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-    ])
+    let title = Paragraph::new(vec![Line::from(vec![
+        Span::styled(
+            "HOX DASHBOARD",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("Session: {}", app.state.session.id),
+            Style::default().fg(Color::Gray),
+        ),
+    ])])
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, header_chunks[0]);
 
     // Keybindings
-    let keybindings = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("[q]", Style::default().fg(Color::Yellow)),
-            Span::raw("uit "),
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::raw("efresh "),
-            Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
-            Span::raw(" switch"),
-        ]),
-    ])
+    let keybindings = Paragraph::new(vec![Line::from(vec![
+        Span::styled("[q]", Style::default().fg(Color::Yellow)),
+        Span::raw("uit "),
+        Span::styled("[r]", Style::default().fg(Color::Yellow)),
+        Span::raw("efresh "),
+        Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+        Span::raw(" switch"),
+    ])])
     .block(Block::default().borders(Borders::ALL))
     .alignment(Alignment::Right);
     frame.render_widget(keybindings, header_chunks[1]);
@@ -118,8 +119,8 @@ fn render_agents(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Tab header
-            Constraint::Min(0),     // Full agents table
+            Constraint::Length(3), // Tab header
+            Constraint::Min(0),    // Full agents table
         ])
         .split(area);
 
@@ -129,7 +130,11 @@ fn render_agents(frame: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("View"))
         .select(1) // Agents is index 1
         .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_widget(tabs, chunks[0]);
 
     // Full agents table with more detail
@@ -144,8 +149,8 @@ fn render_oplog(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Tab header
-            Constraint::Min(0),     // Full event log
+            Constraint::Length(3), // Tab header
+            Constraint::Min(0),    // Full event log
         ])
         .split(area);
 
@@ -155,7 +160,11 @@ fn render_oplog(frame: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("View"))
         .select(2) // Oplog is index 2
         .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_widget(tabs, chunks[0]);
 
     // Full event log

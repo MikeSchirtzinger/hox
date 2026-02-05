@@ -11,11 +11,15 @@ use hox_core::{HoxError, Result};
 pub fn validate_identifier<'a>(input: &'a str, context: &str) -> Result<&'a str> {
     if input.is_empty() {
         return Err(HoxError::PathValidation(format!(
-            "{} cannot be empty", context
+            "{} cannot be empty",
+            context
         )));
     }
     // Check each char is in allowed set
-    if input.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
+    if input
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+    {
         Ok(input)
     } else {
         Err(HoxError::PathValidation(format!(
@@ -32,25 +36,32 @@ pub fn validate_identifier<'a>(input: &'a str, context: &str) -> Result<&'a str>
 pub fn validate_path<'a>(input: &'a str, context: &str) -> Result<&'a str> {
     if input.is_empty() {
         return Err(HoxError::PathValidation(format!(
-            "{} cannot be empty", context
+            "{} cannot be empty",
+            context
         )));
     }
     if input.contains("..") {
         return Err(HoxError::PathValidation(format!(
-            "{} contains directory traversal: '{}'", context, input
+            "{} contains directory traversal: '{}'",
+            context, input
         )));
     }
     if input.contains('\0') {
         return Err(HoxError::PathValidation(format!(
-            "{} contains null byte", context
+            "{} contains null byte",
+            context
         )));
     }
     // Allow typical path characters
-    if input.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | ' ')) {
+    if input
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | ' '))
+    {
         Ok(input)
     } else {
         Err(HoxError::PathValidation(format!(
-            "{} contains unsafe characters: '{}'", context, input
+            "{} contains unsafe characters: '{}'",
+            context, input
         )))
     }
 }
@@ -60,9 +71,16 @@ pub fn validate_path<'a>(input: &'a str, context: &str) -> Result<&'a str> {
 /// Only allows known-safe revset functions and operators.
 pub fn validate_revset(input: &str) -> Result<&str> {
     // Reject characters that could break out of revset context
-    if input.contains('"') || input.contains('\'') || input.contains(';') || input.contains('`') || input.contains('$') || input.contains('\n') {
+    if input.contains('"')
+        || input.contains('\'')
+        || input.contains(';')
+        || input.contains('`')
+        || input.contains('$')
+        || input.contains('\n')
+    {
         return Err(HoxError::JjRevset(format!(
-            "Revset contains unsafe characters: '{}'", input
+            "Revset contains unsafe characters: '{}'",
+            input
         )));
     }
     Ok(input)

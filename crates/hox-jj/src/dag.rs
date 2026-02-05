@@ -295,12 +295,11 @@ impl<E: JjExecutor> DagOperations<E> {
     /// This creates a copy of a change at a new location, useful for trying
     /// multiple approaches to a task in parallel (speculative execution).
     #[instrument(skip(self))]
-    pub async fn duplicate(
-        &self,
-        change_id: &str,
-        destination: Option<&str>,
-    ) -> Result<String> {
-        debug!("Duplicating change {}, destination: {:?}", change_id, destination);
+    pub async fn duplicate(&self, change_id: &str, destination: Option<&str>) -> Result<String> {
+        debug!(
+            "Duplicating change {}, destination: {:?}",
+            change_id, destination
+        );
 
         let mut args = vec!["duplicate", change_id];
         if let Some(dest) = destination {
@@ -538,7 +537,8 @@ mod tests {
         let executor = MockJjExecutor::new().with_response(
             "split -r abc123 --siblings src/main.rs",
             JjOutput {
-                stdout: "Created new change def456789abc\nCreated new change ghi789012def\n".to_string(),
+                stdout: "Created new change def456789abc\nCreated new change ghi789012def\n"
+                    .to_string(),
                 stderr: String::new(),
                 success: true,
             },
@@ -546,7 +546,10 @@ mod tests {
 
         let dag_ops = DagOperations::new(executor);
         let file_groups = vec![vec!["src/main.rs".to_string()]];
-        let result = dag_ops.split_by_files("abc123", &file_groups).await.unwrap();
+        let result = dag_ops
+            .split_by_files("abc123", &file_groups)
+            .await
+            .unwrap();
 
         assert_eq!(result.new_changes.len(), 2);
         assert_eq!(result.new_changes[0], "def456789abc");

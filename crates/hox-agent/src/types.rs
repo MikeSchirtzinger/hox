@@ -255,7 +255,7 @@ pub struct ExternalLoopResult {
     pub files_modified: Vec<String>,
     /// Token usage for this iteration
     pub usage: Option<Usage>,
-    /// Stop signal if present ("[DONE]", "promise", etc.)
+    /// Stop signal if present ("\[DONE\]", "promise", etc.)
     pub stop_signal: Option<String>,
 }
 

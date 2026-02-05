@@ -25,11 +25,11 @@
 //! - `Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
-    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics,
-    JjOpType, JjOplogEntry, OrchestrationSession, PhaseProgress, PhaseStatus, Result,
+    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics, JjOpType, JjOplogEntry,
+    OrchestrationSession, PhaseProgress, PhaseStatus, Result,
 };
-use hox_core::HoxError;
 use chrono::{DateTime, Utc};
+use hox_core::HoxError;
 use std::collections::HashMap;
 use tokio::process::Command;
 
@@ -154,10 +154,7 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HoxError::JjCommand(format!(
-            "jj op log failed: {}",
-            stderr
-        )));
+        return Err(HoxError::JjCommand(format!("jj op log failed: {}", stderr)));
     }
 
     let stdout = String::from_utf8(output.stdout)
@@ -172,7 +169,10 @@ pub async fn fetch_oplog(limit: usize) -> Result<Vec<JjOplogEntry>> {
         match parse_oplog_line(line) {
             Ok(entry) => entries.push(entry),
             Err(e) => {
-                eprintln!("Warning: Failed to parse oplog line: {} (error: {})", line, e);
+                eprintln!(
+                    "Warning: Failed to parse oplog line: {} (error: {})",
+                    line, e
+                );
                 continue;
             }
         }
@@ -208,10 +208,7 @@ pub async fn fetch_commits_with_trailers(limit: usize) -> Result<Vec<CommitWithT
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HoxError::JjCommand(format!(
-            "jj log failed: {}",
-            stderr
-        )));
+        return Err(HoxError::JjCommand(format!("jj log failed: {}", stderr)));
     }
 
     let stdout = String::from_utf8(output.stdout)
@@ -265,7 +262,10 @@ fn parse_commit_with_trailers(line: &str) -> Option<CommitWithTrailers> {
 /// Extract agent nodes from commits with trailers
 ///
 /// This is the preferred method when jj-dev trailers are available.
-fn extract_agents_from_trailers(commits: &[CommitWithTrailers], oplog: &[JjOplogEntry]) -> Vec<AgentNode> {
+fn extract_agents_from_trailers(
+    commits: &[CommitWithTrailers],
+    oplog: &[JjOplogEntry],
+) -> Vec<AgentNode> {
     let mut agents_map: HashMap<String, AgentNode> = HashMap::new();
 
     for commit in commits {
@@ -338,6 +338,7 @@ fn parse_status(s: &str) -> AgentStatus {
         "completed" | "done" | "complete" => AgentStatus::Completed,
         "failed" | "error" => AgentStatus::Failed,
         "blocked" => AgentStatus::Blocked,
+        // Default to Running for unknown status strings - assuming agent is active
         _ => AgentStatus::Running,
     }
 }
@@ -357,14 +358,15 @@ fn parse_oplog_line(line: &str) -> Result<JjOplogEntry> {
     let description = parts[2].trim().to_string();
 
     // Parse timestamp (format: "YYYY-MM-DD HH:MM:SS")
-    let timestamp = DateTime::parse_from_str(
-        &format!("{} +0000", timestamp_str),
-        "%Y-%m-%d %H:%M:%S %z",
-    )
-    .map_err(|e| {
-        HoxError::JjCommand(format!("Failed to parse timestamp '{}': {}", timestamp_str, e))
-    })?
-    .with_timezone(&Utc);
+    let timestamp =
+        DateTime::parse_from_str(&format!("{} +0000", timestamp_str), "%Y-%m-%d %H:%M:%S %z")
+            .map_err(|e| {
+                HoxError::JjCommand(format!(
+                    "Failed to parse timestamp '{}': {}",
+                    timestamp_str, e
+                ))
+            })?
+            .with_timezone(&Utc);
 
     // Extract agent ID if present
     let agent_id = extract_agent_id(&description);
@@ -456,7 +458,9 @@ fn extract_agents_from_oplog(oplog: &[JjOplogEntry]) -> Vec<AgentNode> {
     for entry in oplog {
         if let Some(agent_id) = &entry.agent_id {
             let agent = agents_map.entry(agent_id.clone()).or_insert_with(|| {
-                let phase = entry.tags.get("phase")
+                let phase = entry
+                    .tags
+                    .get("phase")
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(1);
 
@@ -474,11 +478,13 @@ fn extract_agents_from_oplog(oplog: &[JjOplogEntry]) -> Vec<AgentNode> {
                 }
                 JjOpType::Commit | JjOpType::Squash => {
                     // Commits often indicate completion
-                    if entry.description.contains("complete") || entry.description.contains("done") {
+                    if entry.description.contains("complete") || entry.description.contains("done")
+                    {
                         agent.status = AgentStatus::Completed;
                         agent.progress = 1.0;
                     }
                 }
+                // Other operation types (Snapshot, Restore, Rebase, etc.) don't affect agent status
                 _ => {}
             }
 
@@ -501,7 +507,8 @@ fn extract_agents_from_oplog(oplog: &[JjOplogEntry]) -> Vec<AgentNode> {
     // Estimate progress for running agents
     for (agent_id, agent) in agents_map.iter_mut() {
         if agent.status == AgentStatus::Running {
-            let agent_ops: Vec<_> = oplog.iter()
+            let agent_ops: Vec<_> = oplog
+                .iter()
                 .filter(|e| e.agent_id.as_ref() == Some(agent_id))
                 .collect();
             agent.progress = estimate_agent_progress(agent, &agent_ops);
@@ -524,6 +531,9 @@ fn extract_change_id(description: &str) -> Option<String> {
     None
 }
 
+// Default score for operations that don't fit standard categories
+const DEFAULT_OP_SCORE: f64 = 0.05;
+
 /// Calculate estimated progress based on recent operations
 pub fn estimate_agent_progress(agent: &AgentNode, recent_ops: &[&JjOplogEntry]) -> f32 {
     if recent_ops.is_empty() {
@@ -535,22 +545,24 @@ pub fn estimate_agent_progress(agent: &AgentNode, recent_ops: &[&JjOplogEntry]) 
 
     for op in recent_ops {
         match op.op_type {
-            JjOpType::New => score += 0.1,           // Starting
-            JjOpType::Describe => score += 0.15,     // Making progress
-            JjOpType::Commit => score += 0.3,        // Significant progress
-            JjOpType::Squash => score += 0.2,        // Cleanup/organization
-            JjOpType::Rebase => score += 0.1,        // Maintenance
-            _ => score += 0.05,                       // Other activity
+            JjOpType::New => score += 0.1,       // Starting
+            JjOpType::Describe => score += 0.15, // Making progress
+            JjOpType::Commit => score += 0.3,    // Significant progress
+            JjOpType::Squash => score += 0.2,    // Cleanup/organization
+            JjOpType::Rebase => score += 0.1,    // Maintenance
+            // Other operations (Snapshot, Restore, etc.) count as minor activity
+            _ => score += DEFAULT_OP_SCORE,
         }
     }
 
     // Normalize by number of operations and cap at 0.95
-    let normalized = (score / recent_ops.len() as f32).min(0.95);
+    let normalized = ((score / recent_ops.len() as f64).min(0.95)) as f32;
 
     // Factor in current agent state
     match agent.status {
         AgentStatus::Completed => 1.0,
         AgentStatus::Failed => 0.0,
+        // All other statuses (Running, Pending, Blocked) use calculated progress
         _ => normalized,
     }
 }
@@ -574,12 +586,23 @@ fn calculate_global_metrics(agents: &[AgentNode], oplog: &[JjOplogEntry]) -> Glo
     if total_tool_calls == 0 && !oplog.is_empty() {
         total_tool_calls = oplog
             .iter()
-            .filter(|e| matches!(e.op_type, JjOpType::Commit | JjOpType::Describe | JjOpType::Squash))
+            .filter(|e| {
+                matches!(
+                    e.op_type,
+                    JjOpType::Commit | JjOpType::Describe | JjOpType::Squash
+                )
+            })
             .count() as u32;
     }
 
-    let active_agents = agents.iter().filter(|a| a.status == AgentStatus::Running).count();
-    let completed_agents = agents.iter().filter(|a| a.status == AgentStatus::Completed).count();
+    let active_agents = agents
+        .iter()
+        .filter(|a| a.status == AgentStatus::Running)
+        .count();
+    let completed_agents = agents
+        .iter()
+        .filter(|a| a.status == AgentStatus::Completed)
+        .count();
 
     GlobalMetrics {
         total_tool_calls,
@@ -620,17 +643,21 @@ fn build_phase_progress(agents: &[AgentNode]) -> Vec<PhaseProgress> {
     let mut phases_map: HashMap<usize, PhaseProgress> = HashMap::new();
 
     for agent in agents {
-        let phase = phases_map.entry(agent.phase).or_insert_with(|| {
-            PhaseProgress::new(agent.phase, format!("Phase {}", agent.phase))
-        });
+        let phase = phases_map
+            .entry(agent.phase)
+            .or_insert_with(|| PhaseProgress::new(agent.phase, format!("Phase {}", agent.phase)));
 
         phase.agent_ids.push(agent.id.clone());
 
         // Update phase status based on agent statuses
         let phase_agents: Vec<_> = agents.iter().filter(|a| a.phase == agent.phase).collect();
-        let all_completed = phase_agents.iter().all(|a| a.status == AgentStatus::Completed);
+        let all_completed = phase_agents
+            .iter()
+            .all(|a| a.status == AgentStatus::Completed);
         let any_failed = phase_agents.iter().any(|a| a.status == AgentStatus::Failed);
-        let any_running = phase_agents.iter().any(|a| a.status == AgentStatus::Running);
+        let any_running = phase_agents
+            .iter()
+            .any(|a| a.status == AgentStatus::Running);
 
         phase.status = if any_failed {
             PhaseStatus::Failed
@@ -718,10 +745,7 @@ mod tests {
 
     #[test]
     fn test_infer_current_phase() {
-        let mut agents = vec![
-            AgentNode::new("a1", "A1", 1),
-            AgentNode::new("a2", "A2", 2),
-        ];
+        let mut agents = vec![AgentNode::new("a1", "A1", 1), AgentNode::new("a2", "A2", 2)];
         agents[0].status = AgentStatus::Completed;
         agents[1].status = AgentStatus::Running;
         assert_eq!(infer_current_phase(&agents), 2);

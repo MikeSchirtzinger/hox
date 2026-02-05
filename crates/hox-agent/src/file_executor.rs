@@ -82,22 +82,20 @@ pub fn execute_file_operations(output: &str) -> ExecutionResult {
 
     for op in parse_operations(output) {
         match op {
-            FileOperation::WriteToFile { path, content } => {
-                match execute_write(&path, &content) {
-                    Ok(created) => {
-                        if created {
-                            result.files_created.push(path);
-                        } else {
-                            result.files_modified.push(path);
-                        }
-                    }
-                    Err(e) => {
-                        result
-                            .errors
-                            .push(format!("Failed to write {}: {}", path, e));
+            FileOperation::WriteToFile { path, content } => match execute_write(&path, &content) {
+                Ok(created) => {
+                    if created {
+                        result.files_created.push(path);
+                    } else {
+                        result.files_modified.push(path);
                     }
                 }
-            }
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Failed to write {}: {}", path, e));
+                }
+            },
             FileOperation::CaptureScreenshot {
                 url,
                 name,
@@ -435,7 +433,11 @@ Some text after
         let ops = parse_screenshot_blocks(output);
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            FileOperation::CaptureScreenshot { url, name, selector } => {
+            FileOperation::CaptureScreenshot {
+                url,
+                name,
+                selector,
+            } => {
                 assert_eq!(url, "http://localhost:3000");
                 assert_eq!(name, "test-screenshot");
                 assert_eq!(selector.as_deref(), Some(".my-element"));
@@ -456,7 +458,11 @@ Some text after
         let ops = parse_screenshot_blocks(output);
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            FileOperation::CaptureScreenshot { url, name, selector } => {
+            FileOperation::CaptureScreenshot {
+                url,
+                name,
+                selector,
+            } => {
                 assert_eq!(url, "http://example.com");
                 assert_eq!(name, "full-page");
                 assert!(selector.is_none());

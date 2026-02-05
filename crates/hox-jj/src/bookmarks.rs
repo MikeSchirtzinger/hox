@@ -295,16 +295,14 @@ fn glob_match(text: &str, pattern: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
 
     // Pattern starts with *
-    if pattern.starts_with('*')
-        && parts.len() == 2 && parts[0].is_empty() {
-            return text.ends_with(parts[1]);
-        }
+    if pattern.starts_with('*') && parts.len() == 2 && parts[0].is_empty() {
+        return text.ends_with(parts[1]);
+    }
 
     // Pattern ends with *
-    if pattern.ends_with('*')
-        && parts.len() == 2 && parts[1].is_empty() {
-            return text.starts_with(parts[0]);
-        }
+    if pattern.ends_with('*') && parts.len() == 2 && parts[1].is_empty() {
+        return text.starts_with(parts[0]);
+    }
 
     // Pattern has * in middle
     if parts.len() == 2 {
@@ -348,10 +346,7 @@ mod tests {
 
     #[test]
     fn test_get_change_id_prefix() {
-        assert_eq!(
-            get_change_id_prefix("abc123def456ghi789"),
-            "abc123def456"
-        );
+        assert_eq!(get_change_id_prefix("abc123def456ghi789"), "abc123def456");
         assert_eq!(get_change_id_prefix("short"), "short");
     }
 

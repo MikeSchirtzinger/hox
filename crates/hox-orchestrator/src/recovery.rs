@@ -82,10 +82,7 @@ impl<E: JjExecutor> RecoveryManager<E> {
     pub async fn create_recovery_point(&self, description: String) -> Result<RecoveryPoint> {
         let operation_id = self.op_manager.snapshot().await?;
 
-        info!(
-            "Created recovery point: {} ({})",
-            operation_id, description
-        );
+        info!("Created recovery point: {} ({})", operation_id, description);
 
         Ok(RecoveryPoint::new(operation_id, description))
     }

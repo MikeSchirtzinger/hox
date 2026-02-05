@@ -32,15 +32,16 @@ pub fn poll_event(timeout: Duration) -> Result<Option<AppEvent>> {
 
 /// Check if a key event is a quit command (q or Ctrl+C)
 pub fn is_quit_event(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Char('q') | KeyCode::Char('Q')
-    ) || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 /// Check if a key event is a refresh command (r or F5)
 pub fn is_refresh_event(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5))
+    matches!(
+        key.code,
+        KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5)
+    )
 }
 
 /// Check if a key event is a tab forward command (Tab)

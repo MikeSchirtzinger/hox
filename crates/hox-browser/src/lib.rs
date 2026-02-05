@@ -79,8 +79,10 @@ pub mod verification;
 // Re-export commonly used types
 pub use browser::{BrowserConfig, BrowserSession};
 pub use error::{BrowserError, Result};
-pub use screenshot::{ScreenshotOptions, capture_screenshot, capture_full_page, capture_element};
-pub use verification::{VisualCheck, ElementAttribute, verify_element, verify_elements, verify_text, verify_attribute};
+pub use screenshot::{capture_element, capture_full_page, capture_screenshot, ScreenshotOptions};
+pub use verification::{
+    verify_attribute, verify_element, verify_elements, verify_text, ElementAttribute, VisualCheck,
+};
 
 #[cfg(test)]
 mod tests {

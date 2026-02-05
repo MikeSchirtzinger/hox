@@ -106,9 +106,7 @@ impl ReviewGate {
 
         // Check content isn't too short
         if pattern.content.len() < 20 {
-            return ReviewResult::Rejected(
-                "Pattern content too short (min 20 chars)".to_string(),
-            );
+            return ReviewResult::Rejected("Pattern content too short (min 20 chars)".to_string());
         }
 
         // Check for potentially harmful patterns

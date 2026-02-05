@@ -123,12 +123,21 @@ impl ArtifactManager {
 
         // Generate filename: {timestamp}-{type}.{ext}
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-        let filename = format!("{}-{}.{}", timestamp, artifact_type, artifact_type.extension());
+        let filename = format!(
+            "{}-{}.{}",
+            timestamp,
+            artifact_type,
+            artifact_type.extension()
+        );
         let file_path = change_dir.join(&filename);
 
         // Write data to file
         fs::write(&file_path, data).await.map_err(|e| {
-            HoxError::Io(format!("Failed to write artifact {}: {}", file_path.display(), e))
+            HoxError::Io(format!(
+                "Failed to write artifact {}: {}",
+                file_path.display(),
+                e
+            ))
         })?;
 
         let size_bytes = data.len() as u64;
@@ -163,18 +172,21 @@ impl ArtifactManager {
             ))
         })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            HoxError::Io(format!("Failed to read directory entry: {}", e))
-        })? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| HoxError::Io(format!("Failed to read directory entry: {}", e)))?
+        {
             let path = entry.path();
 
             if path.is_file() {
                 // Parse metadata from file
-                let metadata = fs::metadata(&path).await.map_err(|e| {
-                    HoxError::Io(format!("Failed to read file metadata: {}", e))
-                })?;
+                let metadata = fs::metadata(&path)
+                    .await
+                    .map_err(|e| HoxError::Io(format!("Failed to read file metadata: {}", e)))?;
 
-                let file_name = path.file_name()
+                let file_name = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown");
 
@@ -199,10 +211,12 @@ impl ArtifactManager {
                     created_at: metadata
                         .modified()
                         .ok()
-                        .and_then(|t| DateTime::from_timestamp(
-                            t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
-                            0
-                        ))
+                        .and_then(|t| {
+                            DateTime::from_timestamp(
+                                t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+                                0,
+                            )
+                        })
                         .unwrap_or_else(Utc::now),
                     description: format!("Artifact: {}", file_name),
                 });
@@ -231,10 +245,7 @@ impl ArtifactManager {
 /// Requires Chrome running with `--remote-debugging-port=9222`
 /// Requires `screenshots` feature to be enabled
 #[cfg(feature = "screenshots")]
-pub async fn capture_screenshot_cdp(
-    url: &str,
-    selector: Option<&str>,
-) -> Result<Vec<u8>> {
+pub async fn capture_screenshot_cdp(url: &str, selector: Option<&str>) -> Result<Vec<u8>> {
     use headless_chrome::{Browser, LaunchOptions};
 
     // Launch browser (will connect to existing if available)
@@ -263,7 +274,9 @@ pub async fn capture_screenshot_cdp(
             .map_err(|e| HoxError::Other(format!("Failed to find element {}: {}", sel, e)))?;
 
         element
-            .capture_screenshot(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png)
+            .capture_screenshot(
+                headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
+            )
             .map_err(|e| HoxError::Other(format!("Failed to capture element screenshot: {}", e)))?
     } else {
         // Screenshot full page
@@ -281,13 +294,11 @@ pub async fn capture_screenshot_cdp(
 
 /// Capture a screenshot (stub when screenshots feature is disabled)
 #[cfg(not(feature = "screenshots"))]
-pub async fn capture_screenshot_cdp(
-    _url: &str,
-    _selector: Option<&str>,
-) -> Result<Vec<u8>> {
+pub async fn capture_screenshot_cdp(_url: &str, _selector: Option<&str>) -> Result<Vec<u8>> {
     Err(HoxError::Other(
         "Screenshot capture requires 'screenshots' feature to be enabled. \
-         Build with --features screenshots".to_string()
+         Build with --features screenshots"
+            .to_string(),
     ))
 }
 
@@ -332,7 +343,10 @@ mod tests {
     #[test]
     fn test_artifact_type_display() {
         assert_eq!(ArtifactType::Screenshot.to_string(), "screenshot");
-        assert_eq!(ArtifactType::AccessibilityTree.to_string(), "accessibility_tree");
+        assert_eq!(
+            ArtifactType::AccessibilityTree.to_string(),
+            "accessibility_tree"
+        );
         assert_eq!(ArtifactType::Custom("test".to_string()).to_string(), "test");
     }
 
@@ -346,7 +360,10 @@ mod tests {
     #[test]
     fn test_artifact_type_mime_types() {
         assert_eq!(ArtifactType::Screenshot.mime_type(), "image/png");
-        assert_eq!(ArtifactType::AccessibilityTree.mime_type(), "application/json");
+        assert_eq!(
+            ArtifactType::AccessibilityTree.mime_type(),
+            "application/json"
+        );
     }
 
     #[tokio::test]

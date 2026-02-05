@@ -45,7 +45,11 @@ impl<E: JjExecutor + Clone> SpeculativeExecutor<E> {
         change_id: &str,
         strategies: &[String],
     ) -> Result<Vec<String>> {
-        debug!("Creating {} parallel approaches for {}", strategies.len(), change_id);
+        debug!(
+            "Creating {} parallel approaches for {}",
+            strategies.len(),
+            change_id
+        );
 
         let mut duplicate_ids = Vec::new();
 
@@ -59,8 +63,13 @@ impl<E: JjExecutor + Clone> SpeculativeExecutor<E> {
                 .create(&bookmark_name, &new_change_id)
                 .await?;
 
-            debug!("Created approach {} ({}/{}) -> {}",
-                strategy, i + 1, strategies.len(), new_change_id);
+            debug!(
+                "Created approach {} ({}/{}) -> {}",
+                strategy,
+                i + 1,
+                strategies.len(),
+                new_change_id
+            );
 
             duplicate_ids.push(new_change_id);
         }
@@ -131,7 +140,10 @@ mod tests {
 
         let spec_exec = SpeculativeExecutor::new(executor);
         let strategies = vec!["approach-a".to_string()];
-        let change_ids = spec_exec.try_approaches("abc123", &strategies).await.unwrap();
+        let change_ids = spec_exec
+            .try_approaches("abc123", &strategies)
+            .await
+            .unwrap();
 
         assert_eq!(change_ids.len(), 1);
         assert_eq!(change_ids[0], "def456789abc");

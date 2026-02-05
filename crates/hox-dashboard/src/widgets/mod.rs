@@ -6,14 +6,14 @@
 use ratatui::style::Color;
 
 mod agent_graph;
-mod metrics_panel;
-mod event_log;
 mod agent_table;
+mod event_log;
+mod metrics_panel;
 
 pub use agent_graph::AgentGraphWidget;
-pub use metrics_panel::MetricsPanelWidget;
-pub use event_log::EventLogWidget;
 pub use agent_table::AgentTableWidget;
+pub use event_log::EventLogWidget;
+pub use metrics_panel::MetricsPanelWidget;
 
 /// Convert color name string to ratatui Color.
 ///
@@ -26,6 +26,7 @@ pub fn status_color_from_name(color_name: &str) -> Color {
         "green" => Color::Green,
         "red" => Color::Red,
         "magenta" => Color::Magenta,
+        // Unknown color names default to white for safe fallback
         _ => Color::White,
     }
 }

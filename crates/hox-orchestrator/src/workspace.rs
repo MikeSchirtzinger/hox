@@ -80,10 +80,7 @@ impl<E: JjExecutor> WorkspaceManager<E> {
     pub async fn remove_workspace(&mut self, name: &str) -> Result<()> {
         info!("Removing workspace {}", name);
 
-        let output = self
-            .executor
-            .exec(&["workspace", "forget", name])
-            .await?;
+        let output = self.executor.exec(&["workspace", "forget", name]).await?;
 
         if !output.success {
             debug!("Workspace forget warning: {}", output.stderr);

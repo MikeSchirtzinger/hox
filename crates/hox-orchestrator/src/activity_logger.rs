@@ -7,11 +7,14 @@
 //! - Agent output summaries
 //! - Final loop summaries with token usage
 
+use chrono::Utc;
+
+/// Maximum character length for agent output in activity log preview
+const ACTIVITY_LOG_PREVIEW_CHARS: usize = 500;
 use hox_agent::{BackpressureResult, Usage};
 use std::path::PathBuf;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use chrono::Utc;
 
 /// Activity logger for loop iterations
 pub struct ActivityLogger {
@@ -65,9 +68,7 @@ impl ActivityLogger {
 
         let content = format!(
             "### Iteration {}/{}\n**Time**: {}\n\n",
-            iteration,
-            max,
-            timestamp
+            iteration, max, timestamp
         );
 
         self.append(&content).await
@@ -92,13 +93,7 @@ impl ActivityLogger {
         let check_strs: Vec<String> = backpressure
             .checks
             .iter()
-            .map(|c| {
-                format!(
-                    "{}={}",
-                    c.name,
-                    if c.passed { "PASS" } else { "FAIL" }
-                )
-            })
+            .map(|c| format!("{}={}", c.name, if c.passed { "PASS" } else { "FAIL" }))
             .collect();
         if check_strs.is_empty() {
             content.push_str("No checks");
@@ -122,9 +117,12 @@ impl ActivityLogger {
             content.push('\n');
         }
 
-        // Agent output (truncated to first 500 chars)
-        let output_preview = if agent_output.chars().count() > 500 {
-            let truncated: String = agent_output.chars().take(500).collect();
+        // Agent output (truncated to first ACTIVITY_LOG_PREVIEW_CHARS chars)
+        let output_preview = if agent_output.chars().count() > ACTIVITY_LOG_PREVIEW_CHARS {
+            let truncated: String = agent_output
+                .chars()
+                .take(ACTIVITY_LOG_PREVIEW_CHARS)
+                .collect();
             format!("{truncated}...")
         } else {
             agent_output.to_string()
