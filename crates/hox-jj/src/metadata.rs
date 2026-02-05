@@ -28,6 +28,17 @@ pub mod trailers {
     pub const TASK: &str = "Task";
     /// Change ID trailer key
     pub const CHANGE: &str = "Change";
+
+    // Legacy prefixed trailer keys (for backward compatibility)
+    pub const LEGACY_AGENT: &str = "Hox-Agent";
+    pub const LEGACY_STATUS: &str = "Hox-Status";
+    pub const LEGACY_PRIORITY: &str = "Hox-Priority";
+    pub const LEGACY_ORCHESTRATOR: &str = "Hox-Orchestrator";
+    pub const LEGACY_MSG_TO: &str = "Hox-Msg-To";
+    pub const LEGACY_MSG_TYPE: &str = "Hox-Msg-Type";
+    pub const LEGACY_PHASE: &str = "Hox-Phase";
+    pub const LEGACY_TASK: &str = "Hox-Task";
+    pub const LEGACY_CHANGE: &str = "Hox-Change";
 }
 
 /// Manager for Hox metadata operations
@@ -44,40 +55,94 @@ impl<E: JjExecutor> MetadataManager<E> {
     pub fn parse_description(description: &str) -> HoxMetadata {
         let mut metadata = HoxMetadata::new();
 
-        for line in description.lines() {
-            let line = line.trim();
+        let lines: Vec<&str> = description.lines().collect();
 
-            // Split on first colon to separate key from value
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim();
-                let value = value.trim();
+        // Determine trailer sections:
+        // Git trailers appear at the end after a blank line separator, BUT
+        // we also need to support trailers at the beginning (common in our codebase).
+        // To avoid parsing body text like "The Agent: foo is responsible...",
+        // we only parse from:
+        // 1. The beginning up to the first non-trailer line or blank line
+        // 2. After the last blank line to the end
 
-                match key {
-                    trailers::PRIORITY => {
-                        if let Ok(p) = value.parse::<Priority>() {
-                            metadata.priority = Some(p);
+        // Find first non-empty line
+        let first_non_empty = lines.iter().position(|line| !line.trim().is_empty());
+
+        // Find blank lines that could separate sections
+        let blank_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim().is_empty())
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut trailer_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+
+        // Check for trailers at the beginning (before first blank line that appears AFTER content starts)
+        if let Some(first_content) = first_non_empty {
+            // Find first blank line that comes after the first content line
+            let first_blank_after_content =
+                blank_positions.iter().find(|&&pos| pos > first_content);
+
+            if let Some(&first_blank) = first_blank_after_content {
+                trailer_ranges.push(first_content..first_blank);
+            } else {
+                // No blank lines after content, parse entire content
+                trailer_ranges.push(first_content..lines.len());
+            }
+        }
+
+        // Check for trailers at the end (after last blank line)
+        // Only add if different from the beginning range
+        if let Some(&last_blank) = blank_positions.last() {
+            if last_blank + 1 < lines.len() {
+                let end_range = (last_blank + 1)..lines.len();
+                // Avoid duplicate ranges
+                if trailer_ranges.is_empty() || trailer_ranges[0] != end_range {
+                    trailer_ranges.push(end_range);
+                }
+            }
+        }
+
+        for range in trailer_ranges {
+            for line in &lines[range] {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Split on first colon to separate key from value
+                if let Some((key, value)) = line.split_once(':') {
+                    let key = key.trim();
+                    let value = value.trim();
+
+                    match key {
+                        trailers::PRIORITY | trailers::LEGACY_PRIORITY => {
+                            if let Ok(p) = value.parse::<Priority>() {
+                                metadata.priority = Some(p);
+                            }
                         }
-                    }
-                    trailers::STATUS => {
-                        if let Ok(s) = value.parse::<TaskStatus>() {
-                            metadata.status = Some(s);
+                        trailers::STATUS | trailers::LEGACY_STATUS => {
+                            if let Ok(s) = value.parse::<TaskStatus>() {
+                                metadata.status = Some(s);
+                            }
                         }
-                    }
-                    trailers::AGENT => {
-                        metadata.agent = Some(value.to_string());
-                    }
-                    trailers::ORCHESTRATOR => {
-                        metadata.orchestrator = Some(value.to_string());
-                    }
-                    trailers::MSG_TO => {
-                        metadata.msg_to = Some(value.to_string());
-                    }
-                    trailers::MSG_TYPE => {
-                        if let Ok(t) = value.parse::<MessageType>() {
-                            metadata.msg_type = Some(t);
+                        trailers::AGENT | trailers::LEGACY_AGENT => {
+                            metadata.agent = Some(value.to_string());
                         }
+                        trailers::ORCHESTRATOR | trailers::LEGACY_ORCHESTRATOR => {
+                            metadata.orchestrator = Some(value.to_string());
+                        }
+                        trailers::MSG_TO | trailers::LEGACY_MSG_TO => {
+                            metadata.msg_to = Some(value.to_string());
+                        }
+                        trailers::MSG_TYPE | trailers::LEGACY_MSG_TYPE => {
+                            if let Ok(t) = value.parse::<MessageType>() {
+                                metadata.msg_type = Some(t);
+                            }
+                        }
+                        _ => {} // Ignore other trailers
                     }
-                    _ => {} // Ignore other trailers
                 }
             }
         }
@@ -150,6 +215,13 @@ impl<E: JjExecutor> MetadataManager<E> {
                     && !line.starts_with(&format!("{}:", trailers::ORCHESTRATOR))
                     && !line.starts_with(&format!("{}:", trailers::MSG_TO))
                     && !line.starts_with(&format!("{}:", trailers::MSG_TYPE))
+                    // Also strip legacy format
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_PRIORITY))
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_STATUS))
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_AGENT))
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_ORCHESTRATOR))
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_MSG_TO))
+                    && !line.starts_with(&format!("{}:", trailers::LEGACY_MSG_TYPE))
             })
             .collect();
 
@@ -206,10 +278,46 @@ Msg-Type: mutation
             .with_status(TaskStatus::Open)
             .with_orchestrator("O-A-1");
 
-        let formatted = MetadataManager::<crate::command::MockJjExecutor>::format_metadata(&metadata);
+        let formatted =
+            MetadataManager::<crate::command::MockJjExecutor>::format_metadata(&metadata);
 
         assert!(formatted.contains("Priority: critical"));
         assert!(formatted.contains("Status: open"));
         assert!(formatted.contains("Orchestrator: O-A-1"));
+    }
+
+    #[test]
+    fn test_parse_legacy_trailers() {
+        let desc = r#"Task: Implement user API
+
+Hox-Priority: high
+Hox-Status: in_progress
+Hox-Agent: agent-42
+Hox-Orchestrator: O-A-1
+"#;
+
+        let metadata = MetadataManager::<crate::command::MockJjExecutor>::parse_description(desc);
+
+        assert_eq!(metadata.priority, Some(Priority::High));
+        assert_eq!(metadata.status, Some(TaskStatus::InProgress));
+        assert_eq!(metadata.agent, Some("agent-42".to_string()));
+        assert_eq!(metadata.orchestrator, Some("O-A-1".to_string()));
+    }
+
+    #[test]
+    fn test_body_text_not_parsed_as_trailer() {
+        let desc = r#"Implement Agent: foo handler for bar
+
+The Agent: field should not be parsed from body text.
+
+Agent: agent-42
+Status: open
+"#;
+
+        let metadata = MetadataManager::<crate::command::MockJjExecutor>::parse_description(desc);
+
+        // Should parse trailer section Agent, not body text Agent
+        assert_eq!(metadata.agent, Some("agent-42".to_string()));
+        assert_eq!(metadata.status, Some(TaskStatus::Open));
     }
 }

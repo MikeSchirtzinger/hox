@@ -7,11 +7,14 @@
 //! - Agent output summaries
 //! - Final loop summaries with token usage
 
+use chrono::Utc;
+
+/// Maximum character length for agent output in activity log preview
+const ACTIVITY_LOG_PREVIEW_CHARS: usize = 500;
 use hox_agent::{BackpressureResult, Usage};
 use std::path::PathBuf;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use chrono::Utc;
 
 /// Activity logger for loop iterations
 pub struct ActivityLogger {
@@ -65,9 +68,7 @@ impl ActivityLogger {
 
         let content = format!(
             "### Iteration {}/{}\n**Time**: {}\n\n",
-            iteration,
-            max,
-            timestamp
+            iteration, max, timestamp
         );
 
         self.append(&content).await
@@ -88,12 +89,18 @@ impl ActivityLogger {
         content.push_str(&format!("**Iteration {} completed**\n\n", iteration));
 
         // Backpressure status
-        content.push_str(&format!(
-            "**Backpressure**: Tests={}, Lints={}, Builds={}\n\n",
-            if backpressure.tests_passed { "PASS" } else { "FAIL" },
-            if backpressure.lints_passed { "PASS" } else { "FAIL" },
-            if backpressure.builds_passed { "PASS" } else { "FAIL" }
-        ));
+        content.push_str("**Backpressure**: ");
+        let check_strs: Vec<String> = backpressure
+            .checks
+            .iter()
+            .map(|c| format!("{}={}", c.name, if c.passed { "PASS" } else { "FAIL" }))
+            .collect();
+        if check_strs.is_empty() {
+            content.push_str("No checks");
+        } else {
+            content.push_str(&check_strs.join(", "));
+        }
+        content.push_str("\n\n");
 
         // Files changed
         if !files_created.is_empty() || !files_modified.is_empty() {
@@ -110,9 +117,12 @@ impl ActivityLogger {
             content.push('\n');
         }
 
-        // Agent output (truncated to first 500 chars)
-        let output_preview = if agent_output.chars().count() > 500 {
-            let truncated: String = agent_output.chars().take(500).collect();
+        // Agent output (truncated to first ACTIVITY_LOG_PREVIEW_CHARS chars)
+        let output_preview = if agent_output.chars().count() > ACTIVITY_LOG_PREVIEW_CHARS {
+            let truncated: String = agent_output
+                .chars()
+                .take(ACTIVITY_LOG_PREVIEW_CHARS)
+                .collect();
             format!("{truncated}...")
         } else {
             agent_output.to_string()
@@ -224,9 +234,26 @@ mod tests {
         logger.log_iteration_start(1, 5).await.unwrap();
 
         let backpressure = BackpressureResult {
-            tests_passed: true,
-            lints_passed: true,
-            builds_passed: false,
+            checks: vec![
+                hox_agent::CheckOutcome {
+                    name: "test".into(),
+                    passed: true,
+                    severity: hox_agent::Severity::Breaking,
+                    output: String::new(),
+                },
+                hox_agent::CheckOutcome {
+                    name: "lint".into(),
+                    passed: true,
+                    severity: hox_agent::Severity::Breaking,
+                    output: String::new(),
+                },
+                hox_agent::CheckOutcome {
+                    name: "build".into(),
+                    passed: false,
+                    severity: hox_agent::Severity::Breaking,
+                    output: "Build error: missing semicolon".into(),
+                },
+            ],
             errors: vec!["Build error: missing semicolon".to_string()],
         };
 
@@ -246,8 +273,8 @@ mod tests {
             .unwrap();
 
         assert!(content.contains("### Iteration 1/5"));
-        assert!(content.contains("Tests=PASS"));
-        assert!(content.contains("Builds=FAIL"));
+        assert!(content.contains("test=PASS"));
+        assert!(content.contains("build=FAIL"));
         assert!(content.contains("Created: src/main.rs"));
         assert!(content.contains("Modified: Cargo.toml"));
         assert!(content.contains("Build error: missing semicolon"));

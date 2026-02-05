@@ -1,5 +1,0 @@
-cargo:rerun-if-env-changed=NIX_JJ_GIT_HASH
-cargo:rerun-if-changed=../.git/HEAD
-cargo:rustc-env=JJ_VERSION=0.37.0-e65bfc622c7343d4821873c5ba88d33ce94991fd
-cargo:rerun-if-changed=docs
-cargo:rustc-env=JJ_DOCS_DIR=docs/

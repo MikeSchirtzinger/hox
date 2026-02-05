@@ -14,10 +14,32 @@ use hox_agent::{
     execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise,
     ExternalLoopResult, ExternalLoopState, Model,
 };
-use hox_core::{BackpressureStatus, HandoffContext, HoxError, Result, Task};
+use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+
+/// Configuration for a single external iteration
+pub struct ExternalIterationConfig<'a> {
+    /// The task being worked on
+    pub task: &'a Task,
+    /// Handoff context from previous iteration
+    pub context: &'a HandoffContext,
+    /// Backpressure result from previous iteration
+    pub backpressure: &'a BackpressureResult,
+    /// Current iteration number (1-indexed)
+    pub iteration: usize,
+    /// Maximum iterations for the loop
+    pub max_iterations: usize,
+    /// Model to use for agent spawning
+    pub model: Model,
+    /// Maximum tokens for agent response
+    pub max_tokens: usize,
+    /// Path to workspace for backpressure checks
+    pub workspace_path: PathBuf,
+    /// Whether to run backpressure checks
+    pub run_backpressure: bool,
+}
 
 /// Run a single external iteration
 ///
@@ -30,16 +52,8 @@ use tracing::{debug, info};
 ///
 /// # Arguments
 ///
-/// * `task` - The task being worked on
-/// * `context` - Handoff context from previous iteration (or initial)
-/// * `backpressure` - Backpressure result from previous iteration (or initial)
-/// * `iteration` - Current iteration number (1-indexed)
-/// * `max_iterations` - Maximum iterations for the loop
-/// * `model` - Model to use for agent spawning
-/// * `max_tokens` - Maximum tokens for agent response
-/// * `workspace_path` - Path to workspace for backpressure checks
+/// * `config` - Iteration configuration (see `ExternalIterationConfig`)
 /// * `executor` - JJ command executor for running jj fix
-/// * `run_backpressure` - Whether to run backpressure checks
 ///
 /// # Returns
 ///
@@ -52,32 +66,30 @@ use tracing::{debug, info};
 /// - Token usage
 /// - Stop signal (if any)
 pub async fn run_external_iteration<E: JjExecutor>(
-    task: &Task,
-    context: &HandoffContext,
-    backpressure: &BackpressureResult,
-    iteration: usize,
-    max_iterations: usize,
-    model: Model,
-    max_tokens: usize,
-    workspace_path: &PathBuf,
+    config: &ExternalIterationConfig<'_>,
     executor: &E,
-    run_backpressure: bool,
 ) -> Result<ExternalLoopResult> {
     info!(
         "Running external iteration {} of {} for task {}",
-        iteration, max_iterations, task.change_id
+        config.iteration, config.max_iterations, config.task.change_id
     );
 
     // Build prompt with current context and backpressure
-    let prompt = build_iteration_prompt(task, context, backpressure, iteration, max_iterations);
+    let prompt = build_iteration_prompt(
+        config.task,
+        config.context,
+        config.backpressure,
+        config.iteration,
+        config.max_iterations,
+    );
     debug!("Prompt length: {} chars", prompt.len());
 
     // Spawn fresh agent
-    let result = spawn_agent(&prompt, iteration, model, max_tokens).await?;
+    let result = spawn_agent(&prompt, config.iteration, config.model, config.max_tokens).await?;
 
     info!(
         "Agent iteration {} complete ({} chars output)",
-        iteration,
+        config.iteration,
         result.output.len()
     );
 
@@ -90,11 +102,11 @@ pub async fn run_external_iteration<E: JjExecutor>(
         new_context
     } else {
         // If no context update, keep existing
-        context.clone()
+        config.context.clone()
     };
 
     // Update iteration tracking
-    updated_context.loop_iteration = Some(iteration);
+    updated_context.loop_iteration = Some(config.iteration);
     updated_context
         .files_touched
         .extend(exec_result.files_created.clone());
@@ -103,18 +115,31 @@ pub async fn run_external_iteration<E: JjExecutor>(
         .extend(exec_result.files_modified.clone());
 
     // Run backpressure checks if enabled (with jj fix)
-    let new_backpressure = if run_backpressure {
-        let bp = run_all_checks_with_fix(workspace_path, executor, Some(&task.change_id)).await?;
-        info!(
-            "Backpressure: tests={}, lints={}, builds={}",
-            bp.tests_passed, bp.lints_passed, bp.builds_passed
-        );
+    let new_backpressure = if config.run_backpressure {
+        let bp = run_all_checks_with_fix(
+            &config.workspace_path,
+            executor,
+            Some(&config.task.change_id),
+        )
+        .await?;
+        for check in &bp.checks {
+            info!(
+                "  {} {}",
+                check.name,
+                if check.passed { "PASSED" } else { "FAILED" }
+            );
+        }
 
         // Update context with backpressure status
         updated_context.backpressure_status = Some(BackpressureStatus {
-            tests_passed: bp.tests_passed,
-            lints_passed: bp.lints_passed,
-            builds_passed: bp.builds_passed,
+            checks: bp
+                .checks
+                .iter()
+                .map(|c| CheckStatusEntry {
+                    name: c.name.clone(),
+                    passed: c.passed,
+                })
+                .collect(),
             last_errors: bp.errors.clone(),
         });
 
@@ -134,7 +159,7 @@ pub async fn run_external_iteration<E: JjExecutor>(
         .map_err(|e| HoxError::Io(format!("Failed to serialize context: {}", e)))?;
 
     Ok(ExternalLoopResult {
-        iteration,
+        iteration: config.iteration,
         success: new_backpressure.all_passed(),
         output: result.output,
         context: context_json,
@@ -146,7 +171,7 @@ pub async fn run_external_iteration<E: JjExecutor>(
 }
 
 /// Load external loop state from JSON file
-pub async fn load_state(path: &PathBuf) -> Result<ExternalLoopState> {
+pub async fn load_state(path: &Path) -> Result<ExternalLoopState> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| HoxError::Io(format!("Failed to read state file: {}", e)))?;
@@ -156,7 +181,7 @@ pub async fn load_state(path: &PathBuf) -> Result<ExternalLoopState> {
 }
 
 /// Save external loop state to JSON file
-pub async fn save_state(state: &ExternalLoopState, path: &PathBuf) -> Result<()> {
+pub async fn save_state(state: &ExternalLoopState, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| HoxError::Io(format!("Failed to serialize state: {}", e)))?;
 
@@ -223,10 +248,7 @@ mod tests {
     #[test]
     fn test_detect_stop_signal_legacy() {
         let output = "Some work done.\n[DONE]\n";
-        assert_eq!(
-            detect_stop_signal(output),
-            Some("legacy_stop".to_string())
-        );
+        assert_eq!(detect_stop_signal(output), Some("legacy_stop".to_string()));
     }
 
     #[test]

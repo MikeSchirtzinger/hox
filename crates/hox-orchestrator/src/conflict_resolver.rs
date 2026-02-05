@@ -41,7 +41,7 @@ pub struct ConflictInfo {
 }
 
 /// Report of resolution attempt results
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolutionReport {
     pub total_conflicts: usize,
     pub auto_resolved: usize,
@@ -52,13 +52,7 @@ pub struct ResolutionReport {
 
 impl ResolutionReport {
     pub fn new() -> Self {
-        Self {
-            total_conflicts: 0,
-            auto_resolved: 0,
-            agent_resolved: 0,
-            needs_human: 0,
-            failed: 0,
-        }
+        Self::default()
     }
 }
 
@@ -103,8 +97,8 @@ impl<E: JjExecutor + Clone> ConflictResolver<E> {
 
         // Check if conflicts are formatting-only
         // Simple heuristic: if all files are .rs and diff is small, likely formatting
-        let is_formatting_only = files.iter().all(|f| f.ends_with(".rs"))
-            && output.stdout.lines().count() < 20;
+        let is_formatting_only =
+            files.iter().all(|f| f.ends_with(".rs")) && output.stdout.lines().count() < 20;
 
         if files.is_empty() {
             Ok(Vec::new())
@@ -147,10 +141,7 @@ impl<E: JjExecutor + Clone> ConflictResolver<E> {
         // For now, we escalate complex conflicts to human review
         debug!("Recommending HumanReview for complex conflict");
         ResolutionStrategy::HumanReview {
-            reason: format!(
-                "Complex semantic conflict in {} files",
-                info.files.len()
-            ),
+            reason: format!("Complex semantic conflict in {} files", info.files.len()),
         }
     }
 
@@ -228,8 +219,8 @@ impl<E: JjExecutor + Clone> ConflictResolver<E> {
                                 // Not implemented yet, count as needs human
                                 report.needs_human += 1;
                             }
+                            // JjFix and PickSide strategies that return false count as failed
                             _ => {
-                                // Strategy failed
                                 report.failed += 1;
                             }
                         }

@@ -4,7 +4,9 @@
 
 use crate::{
     app::App,
-    event::{self, is_next_tab_event, is_prev_tab_event, is_quit_event, is_refresh_event, AppEvent},
+    event::{
+        self, is_next_tab_event, is_prev_tab_event, is_quit_event, is_refresh_event, AppEvent,
+    },
     terminal, ui, DashboardConfig, Result,
 };
 use std::time::Duration;

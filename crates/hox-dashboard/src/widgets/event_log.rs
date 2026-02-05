@@ -2,7 +2,7 @@
 //!
 //! Displays recent JJ operations in a scrollable log format.
 
-use crate::{DashboardState, JjOplogEntry, JjOpType};
+use crate::{DashboardState, JjOpType, JjOplogEntry};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem},

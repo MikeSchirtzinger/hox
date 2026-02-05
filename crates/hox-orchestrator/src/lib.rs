@@ -25,12 +25,17 @@ mod speculative;
 mod workspace;
 
 pub use activity_logger::ActivityLogger;
-pub use backpressure::{format_errors_for_prompt, run_all_checks};
+pub use backpressure::{
+    detect_checks, format_errors_for_prompt, run_all_checks, run_checks, run_failed_checks,
+    CheckCommand,
+};
 pub use communication::{Message, MessageRouter};
-pub use conflict_resolver::{ConflictInfo, ConflictResolver, ConflictSide, ResolutionReport, ResolutionStrategy};
+pub use conflict_resolver::{
+    ConflictInfo, ConflictResolver, ConflictSide, ResolutionReport, ResolutionStrategy,
+};
 pub use loop_engine::LoopEngine;
 pub use loop_external::{
-    create_initial_state, load_state, run_external_iteration, save_state,
+    create_initial_state, load_state, run_external_iteration, save_state, ExternalIterationConfig,
 };
 pub use orchestrator::{Orchestrator, OrchestratorConfig, OrchestratorState};
 pub use phases::{PhaseManager, PhaseStatus};

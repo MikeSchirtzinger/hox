@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use tracing::{debug, instrument};
 
 use crate::command::JjExecutor;
+use crate::validate::validate_identifier;
 
 /// Information about a bookmark
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Creates bookmark: `agent/{agent_name}/task/{change_id_prefix}`
     #[instrument(skip(self))]
     pub async fn assign_task(&self, agent_name: &str, change_id: &ChangeId) -> Result<()> {
+        validate_identifier(agent_name, "agent_name")?;
         let change_id_prefix = get_change_id_prefix(change_id);
         let bookmark_name = format!("agent/{}/task/{}", agent_name, change_id_prefix);
 
@@ -177,6 +179,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Deletes bookmark: `agent/{agent_name}/task/{change_id_prefix}`
     #[instrument(skip(self))]
     pub async fn unassign_task(&self, agent_name: &str, change_id: &ChangeId) -> Result<()> {
+        validate_identifier(agent_name, "agent_name")?;
         let change_id_prefix = get_change_id_prefix(change_id);
         let bookmark_name = format!("agent/{}/task/{}", agent_name, change_id_prefix);
 
@@ -189,6 +192,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Lists bookmarks matching: `agent/{agent_name}/task/*`
     #[instrument(skip(self))]
     pub async fn agent_tasks(&self, agent_name: &str) -> Result<HashMap<String, ChangeId>> {
+        validate_identifier(agent_name, "agent_name")?;
         let pattern = format!("agent/{}/task/*", agent_name);
         let bookmarks = self.list(Some(&pattern)).await?;
 
@@ -209,6 +213,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Reverse lookup: searches for bookmarks matching `agent/*/task/{change_id_prefix}`
     #[instrument(skip(self))]
     pub async fn task_agent(&self, change_id: &ChangeId) -> Result<Option<String>> {
+        validate_identifier(change_id, "change_id")?;
         let change_id_prefix = get_change_id_prefix(change_id);
         let pattern = format!("agent/*/task/{}", change_id_prefix);
 
@@ -230,6 +235,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Creates bookmark: `orchestrator/{orch_id}`
     #[instrument(skip(self))]
     pub async fn mark_orchestrator(&self, orch_id: &str, change_id: &ChangeId) -> Result<()> {
+        validate_identifier(orch_id, "orchestrator_id")?;
         let bookmark_name = format!("orchestrator/{}", orch_id);
         debug!("Marking orchestrator {} at {}", orch_id, change_id);
         self.create(&bookmark_name, change_id).await
@@ -240,6 +246,7 @@ impl<E: JjExecutor> BookmarkManager<E> {
     /// Creates bookmark: `session/{session_id}`
     #[instrument(skip(self))]
     pub async fn session_bookmark(&self, session_id: &str, change_id: &ChangeId) -> Result<()> {
+        validate_identifier(session_id, "session_id")?;
         let bookmark_name = format!("session/{}", session_id);
         debug!("Creating session bookmark {} at {}", session_id, change_id);
         self.create(&bookmark_name, change_id).await
@@ -288,17 +295,13 @@ fn glob_match(text: &str, pattern: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
 
     // Pattern starts with *
-    if pattern.starts_with('*') {
-        if parts.len() == 2 && parts[0].is_empty() {
-            return text.ends_with(parts[1]);
-        }
+    if pattern.starts_with('*') && parts.len() == 2 && parts[0].is_empty() {
+        return text.ends_with(parts[1]);
     }
 
     // Pattern ends with *
-    if pattern.ends_with('*') {
-        if parts.len() == 2 && parts[1].is_empty() {
-            return text.starts_with(parts[0]);
-        }
+    if pattern.ends_with('*') && parts.len() == 2 && parts[1].is_empty() {
+        return text.starts_with(parts[0]);
     }
 
     // Pattern has * in middle
@@ -343,10 +346,7 @@ mod tests {
 
     #[test]
     fn test_get_change_id_prefix() {
-        assert_eq!(
-            get_change_id_prefix("abc123def456ghi789"),
-            "abc123def456"
-        );
+        assert_eq!(get_change_id_prefix("abc123def456ghi789"), "abc123def456");
         assert_eq!(get_change_id_prefix("short"), "short");
     }
 

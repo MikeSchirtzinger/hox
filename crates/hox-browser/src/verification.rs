@@ -159,7 +159,10 @@ pub async fn verify_text(
     selector: &str,
     expected_text: &str,
 ) -> Result<bool> {
-    debug!("Verifying text in {}: expected '{}'", selector, expected_text);
+    debug!(
+        "Verifying text in {}: expected '{}'",
+        selector, expected_text
+    );
 
     let actual_text = session.get_text_content(selector).await?;
     let matches = actual_text.trim() == expected_text.trim();
@@ -235,8 +238,7 @@ async fn get_element_attributes(
 
     let result = session.evaluate_script(&script).await?;
 
-    let attributes: Vec<ElementAttribute> = serde_json::from_value(result)
-        .unwrap_or_default();
+    let attributes: Vec<ElementAttribute> = serde_json::from_value(result).unwrap_or_default();
 
     Ok(attributes)
 }

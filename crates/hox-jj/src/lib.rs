@@ -16,6 +16,7 @@ mod dag;
 mod metadata;
 pub mod oplog;
 mod revsets;
+mod validate;
 
 pub use bookmarks::{BookmarkInfo, BookmarkManager};
 pub use command::{JjCommand, JjExecutor, JjOutput, MockJjExecutor};
@@ -23,3 +24,4 @@ pub use dag::{AbsorbResult, DagOperations, EvolutionEntry, ParallelizeResult, Sp
 pub use metadata::MetadataManager;
 pub use oplog::{OpLogEvent, OpLogWatcher, OpLogWatcherConfig, OpManager, OperationInfo};
 pub use revsets::RevsetQueries;
+pub use validate::{validate_identifier, validate_path, validate_revset};

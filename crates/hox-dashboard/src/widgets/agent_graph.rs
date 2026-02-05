@@ -96,12 +96,7 @@ impl AgentGraphWidget {
     }
 
     /// Render a single phase box with agents
-    fn render_phase(
-        state: &DashboardState,
-        phase: &PhaseProgress,
-        area: Rect,
-        buf: &mut Buffer,
-    ) {
+    fn render_phase(state: &DashboardState, phase: &PhaseProgress, area: Rect, buf: &mut Buffer) {
         if area.width < 8 || area.height < 3 {
             return;
         }
@@ -124,12 +119,7 @@ impl AgentGraphWidget {
         for y in area.y..area.y + area.height {
             buf.set_string(area.x, y, "│", Style::default().fg(color));
             if area.width > 1 {
-                buf.set_string(
-                    area.x + area.width - 1,
-                    y,
-                    "│",
-                    Style::default().fg(color),
-                );
+                buf.set_string(area.x + area.width - 1, y, "│", Style::default().fg(color));
             }
         }
 
@@ -157,7 +147,11 @@ impl AgentGraphWidget {
         // Phase name (truncated if needed)
         let max_chars = area.width.saturating_sub(2) as usize;
         let name = if phase.name.chars().count() > max_chars {
-            let truncated: String = phase.name.chars().take(max_chars.saturating_sub(1)).collect();
+            let truncated: String = phase
+                .name
+                .chars()
+                .take(max_chars.saturating_sub(1))
+                .collect();
             format!("{truncated}…")
         } else {
             phase.name.clone()
@@ -202,19 +196,18 @@ impl AgentGraphWidget {
                     format!(
                         "{} {}",
                         agent.status.indicator(),
-                        agent.name.chars().take(area.width.saturating_sub(4) as usize).collect::<String>()
+                        agent
+                            .name
+                            .chars()
+                            .take(area.width.saturating_sub(4) as usize)
+                            .collect::<String>()
                     )
                 } else {
                     agent.status.indicator().to_string()
                 };
 
                 let agent_color = status_color_from_name(agent.status.color_name());
-                buf.set_string(
-                    area.x + 1,
-                    y,
-                    &agent_line,
-                    Style::default().fg(agent_color),
-                );
+                buf.set_string(area.x + 1, y, &agent_line, Style::default().fg(agent_color));
             }
         }
     }
@@ -234,7 +227,6 @@ impl AgentGraphWidget {
         let empty = width.saturating_sub(filled);
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     }
-
 }
 
 #[cfg(test)]

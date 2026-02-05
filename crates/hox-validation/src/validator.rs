@@ -175,7 +175,11 @@ impl Validator {
     }
 
     /// Run a single validation check
-    async fn run_check(&self, check: &ValidationCheck, change_id: &ChangeId) -> Result<CheckResult> {
+    async fn run_check(
+        &self,
+        check: &ValidationCheck,
+        change_id: &ChangeId,
+    ) -> Result<CheckResult> {
         match check {
             ValidationCheck::Compilation => self.check_compilation(change_id).await,
             ValidationCheck::Tests => self.check_tests(change_id).await,
@@ -298,7 +302,10 @@ mod tests {
         let config = ValidatorConfig::default();
         let validator = Validator::new(config);
 
-        let report = validator.validate(&"test-change-id".to_string()).await.unwrap();
+        let report = validator
+            .validate(&"test-change-id".to_string())
+            .await
+            .unwrap();
 
         assert_eq!(report.result, ValidationResult::Pass);
         assert!(report.score > 0.0);

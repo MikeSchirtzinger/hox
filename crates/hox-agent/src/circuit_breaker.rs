@@ -134,6 +134,7 @@ impl CircuitBreaker {
                 let elapsed = now.saturating_sub(last_failure);
                 (self.timeout.as_millis() as u64).saturating_sub(elapsed)
             }
+            // Closed and HalfOpen states can execute immediately - no retry delay
             _ => 0,
         }
     }

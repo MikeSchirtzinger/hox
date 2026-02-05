@@ -1,7 +1,7 @@
 //! PRD decomposition into phases and tasks
 
-use hox_core::{Phase, Priority, TaskStatus};
 use crate::prd::ProjectRequirementsDocument;
+use hox_core::{Phase, Priority, TaskStatus};
 
 /// Decomposes a PRD into executable phases and task descriptions
 pub struct PrdDecomposer;
@@ -43,7 +43,9 @@ impl PrdDecomposer {
                         story.as_a,
                         story.i_want,
                         story.so_that,
-                        story.acceptance_criteria.iter()
+                        story
+                            .acceptance_criteria
+                            .iter()
                             .map(|c| format!("- [ ] {}", c))
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -61,12 +63,12 @@ impl PrdDecomposer {
 
         phases.push(Phase::integration(
             integration_phase as u32,
-            "Integrate all epic work"
+            "Integrate all epic work",
         ));
 
         phases.push(Phase::validation(
             validation_phase as u32,
-            "Validate against requirements"
+            "Validate against requirements",
         ));
 
         (phases, tasks)
@@ -76,9 +78,7 @@ impl PrdDecomposer {
     pub fn summarize(prd: &ProjectRequirementsDocument) -> DecompositionSummary {
         let (phases, tasks) = Self::decompose(prd);
 
-        let total_stories: usize = prd.epics.iter()
-            .map(|e| e.stories.len())
-            .sum();
+        let total_stories: usize = prd.epics.iter().map(|e| e.stories.len()).sum();
 
         DecompositionSummary {
             project_name: prd.project_name.clone(),
@@ -86,11 +86,14 @@ impl PrdDecomposer {
             total_stories,
             total_phases: phases.len(),
             total_tasks: tasks.len(),
-            phases: phases.iter().map(|p| PhaseInfo {
-                number: p.number,
-                name: p.name.clone(),
-                description: p.description.clone(),
-            }).collect(),
+            phases: phases
+                .iter()
+                .map(|p| PhaseInfo {
+                    number: p.number,
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -111,11 +114,7 @@ impl TaskDescription {
     pub fn to_change_description(&self) -> String {
         format!(
             "Task: {}\nPriority: {}\nStatus: {}\nPhase: {}\n\n{}",
-            self.title,
-            self.priority as u32,
-            self.status,
-            self.phase,
-            self.description
+            self.title, self.priority as u32, self.status, self.phase, self.description
         )
     }
 }
@@ -149,7 +148,11 @@ impl std::fmt::Display for DecompositionSummary {
         writeln!(f)?;
         writeln!(f, "Phase Breakdown:")?;
         for phase in &self.phases {
-            writeln!(f, "  Phase {}: {} - {}", phase.number, phase.name, phase.description)?;
+            writeln!(
+                f,
+                "  Phase {}: {} - {}",
+                phase.number, phase.name, phase.description
+            )?;
         }
         Ok(())
     }

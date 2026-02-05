@@ -2,9 +2,9 @@
 
 use crate::browser::BrowserSession;
 use crate::error::Result;
-use hox_core::HoxError;
 use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
 use hox_agent::{ArtifactManager, ArtifactType, ValidationArtifact};
+use hox_core::HoxError;
 use tracing::{debug, info};
 
 /// Screenshot capture options
@@ -91,10 +91,7 @@ pub async fn capture_screenshot(
     name: &str,
     options: ScreenshotOptions,
 ) -> Result<ValidationArtifact> {
-    info!(
-        "Capturing screenshot '{}' for change {}",
-        name, change_id
-    );
+    info!("Capturing screenshot '{}' for change {}", name, change_id);
 
     // Capture screenshot data
     let screenshot_data = if let Some(ref selector) = options.selector {
@@ -113,7 +110,12 @@ pub async fn capture_screenshot(
     };
 
     let artifact: ValidationArtifact = artifact_manager
-        .store_artifact(change_id, ArtifactType::Screenshot, &screenshot_data, &description)
+        .store_artifact(
+            change_id,
+            ArtifactType::Screenshot,
+            &screenshot_data,
+            &description,
+        )
         .await
         .map_err(|e| HoxError::Browser(format!("Failed to store artifact: {}", e)))?;
 
@@ -127,7 +129,10 @@ pub async fn capture_screenshot(
 }
 
 /// Capture full page screenshot
-async fn capture_full_page_screenshot(session: &BrowserSession, full_page: bool) -> Result<Vec<u8>> {
+async fn capture_full_page_screenshot(
+    session: &BrowserSession,
+    full_page: bool,
+) -> Result<Vec<u8>> {
     let tab = session.tab();
 
     let screenshot_data = tab

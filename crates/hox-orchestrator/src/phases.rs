@@ -30,8 +30,7 @@ impl PhaseManager {
 
     /// Add a phase
     pub fn add_phase(&mut self, phase: Phase) {
-        self.phase_status
-            .insert(phase.number, PhaseStatus::Pending);
+        self.phase_status.insert(phase.number, PhaseStatus::Pending);
         self.phases.push(phase);
         self.phases.sort_by_key(|p| p.number);
     }
@@ -98,9 +97,9 @@ impl PhaseManager {
 
     /// Check if all phases are completed
     pub fn all_completed(&self) -> bool {
-        self.phases.iter().all(|p| {
-            self.phase_status.get(&p.number) == Some(&PhaseStatus::Completed)
-        })
+        self.phases
+            .iter()
+            .all(|p| self.phase_status.get(&p.number) == Some(&PhaseStatus::Completed))
     }
 
     /// Add a task to a phase
@@ -109,10 +108,7 @@ impl PhaseManager {
             phase.tasks.push(change_id);
             Ok(())
         } else {
-            Err(HoxError::Phase(format!(
-                "Phase {} not found",
-                phase_number
-            )))
+            Err(HoxError::Phase(format!("Phase {} not found", phase_number)))
         }
     }
 
@@ -176,10 +172,7 @@ mod tests {
         assert_eq!(manager.current_phase().unwrap().number, 0);
 
         manager.start_current_phase().unwrap();
-        assert_eq!(
-            manager.phase_status(0),
-            Some(&PhaseStatus::InProgress)
-        );
+        assert_eq!(manager.phase_status(0), Some(&PhaseStatus::InProgress));
 
         manager.complete_current_phase().unwrap();
         assert_eq!(manager.current_phase().unwrap().number, 1);

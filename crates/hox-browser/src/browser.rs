@@ -1,8 +1,8 @@
 //! Browser lifecycle management using Chrome DevTools Protocol
 
 use crate::error::Result;
-use hox_core::HoxError;
 use headless_chrome::{Browser, LaunchOptions, Tab};
+use hox_core::HoxError;
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,7 +77,10 @@ impl BrowserSession {
             .map_err(|e| HoxError::Browser(format!("Failed to launch browser: {}", e)))?;
 
         // Add user agent if specified
-        let user_agent_arg: Option<String> = config.user_agent.as_ref().map(|ua| format!("--user-agent={}", ua));
+        let user_agent_arg: Option<String> = config
+            .user_agent
+            .as_ref()
+            .map(|ua| format!("--user-agent={}", ua));
         if let Some(ref ua_arg) = user_agent_arg {
             launch_options.args.push(OsStr::new(ua_arg));
         }
@@ -149,9 +152,13 @@ impl BrowserSession {
     /// * `selector` - CSS selector for the element
     /// * `timeout` - Optional timeout duration (uses config default if None)
     pub async fn wait_for_element(&self, selector: &str, timeout: Option<Duration>) -> Result<()> {
-        let timeout_duration = timeout.unwrap_or_else(|| Duration::from_secs(self.config.timeout_seconds));
+        let timeout_duration =
+            timeout.unwrap_or_else(|| Duration::from_secs(self.config.timeout_seconds));
 
-        debug!("Waiting for element: {} (timeout: {:?})", selector, timeout_duration);
+        debug!(
+            "Waiting for element: {} (timeout: {:?})",
+            selector, timeout_duration
+        );
 
         self.tab
             .wait_for_element_with_custom_timeout(selector, timeout_duration)

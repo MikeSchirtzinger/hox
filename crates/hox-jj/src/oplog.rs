@@ -9,6 +9,9 @@ use tracing::{debug, info, warn};
 
 use crate::command::JjExecutor;
 
+/// OpLog event channel buffer - sized for burst jj operations
+const OPLOG_CHANNEL_BUFFER: usize = 100;
+
 /// Events emitted by the oplog watcher
 #[derive(Debug, Clone)]
 pub enum OpLogEvent {
@@ -105,14 +108,19 @@ impl<E: JjExecutor + 'static> OpLogWatcher<E> {
 
     /// Start watching and return a receiver for events
     pub async fn watch(mut self) -> Result<mpsc::Receiver<OpLogEvent>> {
-        let (tx, rx) = mpsc::channel(100);
+        // Buffer sized for 100 ops to handle bursts from rapid jj operations
+        // (e.g., rebase generating multiple change events). Receiver spawned
+        // immediately so backpressure is unlikely.
+        let (tx, rx) = mpsc::channel(OPLOG_CHANNEL_BUFFER);
 
         // Get initial operation ID
         if let Some((id, _)) = self.current_operation().await? {
             self.last_operation_id = Some(id);
         }
 
-        let _ = tx.send(OpLogEvent::Started).await;
+        if let Err(e) = tx.send(OpLogEvent::Started).await {
+            warn!("OpLog channel send failed: {e}");
+        }
         info!("OpLog watcher started for {}", self.repo_root().display());
 
         tokio::spawn(async move {
@@ -146,12 +154,16 @@ impl<E: JjExecutor + 'static> OpLogWatcher<E> {
                     }
                     Err(e) => {
                         warn!("Error checking oplog: {}", e);
-                        let _ = tx.send(OpLogEvent::Error(e.to_string())).await;
+                        if let Err(e) = tx.send(OpLogEvent::Error(e.to_string())).await {
+                            warn!("OpLog channel send failed: {e}");
+                        }
                     }
                 }
             }
 
-            let _ = tx.send(OpLogEvent::Stopped).await;
+            if let Err(e) = tx.send(OpLogEvent::Stopped).await {
+                warn!("OpLog channel send failed: {e}");
+            }
             info!("OpLog watcher stopped");
         });
 
@@ -267,10 +279,7 @@ impl<E: JjExecutor> OpManager<E> {
     /// This makes the given operation the current state, discarding all
     /// operations that came after it.
     pub async fn restore(&self, operation_id: &str) -> Result<()> {
-        let output = self
-            .executor
-            .exec(&["op", "restore", operation_id])
-            .await?;
+        let output = self.executor.exec(&["op", "restore", operation_id]).await?;
 
         if !output.success {
             return Err(HoxError::JjCommand(format!(
@@ -289,10 +298,7 @@ impl<E: JjExecutor> OpManager<E> {
     pub async fn revert(&self, operation_id: &str) -> Result<()> {
         // TODO: This command may not exist in current JJ versions
         // When available, it should create an inverse operation instead of discarding history
-        let output = self
-            .executor
-            .exec(&["op", "revert", operation_id])
-            .await?;
+        let output = self.executor.exec(&["op", "revert", operation_id]).await?;
 
         if !output.success {
             // If command doesn't exist, fall back to restore for now

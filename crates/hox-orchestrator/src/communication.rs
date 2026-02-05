@@ -42,8 +42,7 @@ impl Message {
 
     /// Create a mutation message from an orchestrator
     pub fn mutation(orchestrator: &OrchestratorId, content: impl Into<String>) -> Self {
-        Self::new(orchestrator.to_string(), "*", MessageType::Mutation)
-            .with_content(content)
+        Self::new(orchestrator.to_string(), "*", MessageType::Mutation).with_content(content)
     }
 
     /// Create an alignment request from an agent
@@ -52,8 +51,7 @@ impl Message {
         orchestrator: &OrchestratorId,
         content: impl Into<String>,
     ) -> Self {
-        Self::new(agent, orchestrator.to_string(), MessageType::AlignRequest)
-            .with_content(content)
+        Self::new(agent, orchestrator.to_string(), MessageType::AlignRequest).with_content(content)
     }
 
     /// Create an info message

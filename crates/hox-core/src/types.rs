@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Task priority levels (matches jj-dev enhancement)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Critical = 0,
@@ -216,7 +218,12 @@ impl std::fmt::Display for AgentId {
         if let Some(name) = &self.name {
             write!(f, "{}/{}", self.orchestrator, name)
         } else {
-            write!(f, "{}/agent-{}", self.orchestrator, &self.id.to_string()[..8])
+            write!(
+                f,
+                "{}/agent-{}",
+                self.orchestrator,
+                &self.id.to_string()[..8]
+            )
         }
     }
 }
@@ -318,19 +325,24 @@ impl Task {
     }
 }
 
+/// Status of a single backpressure check (for metadata tracking)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckStatusEntry {
+    pub name: String,
+    pub passed: bool,
+}
+
 /// Backpressure status for loop tracking
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackpressureStatus {
-    pub tests_passed: bool,
-    pub lints_passed: bool,
-    pub builds_passed: bool,
+    pub checks: Vec<CheckStatusEntry>,
     pub last_errors: Vec<String>,
 }
 
 impl BackpressureStatus {
     /// Check if all validations passed
     pub fn all_passed(&self) -> bool {
-        self.tests_passed && self.lints_passed && self.builds_passed
+        self.checks.is_empty() || self.checks.iter().all(|c| c.passed)
     }
 }
 

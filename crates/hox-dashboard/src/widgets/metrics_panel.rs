@@ -143,12 +143,7 @@ impl MetricsPanelWidget {
             metrics.active_agents
         );
 
-        buf.set_string(
-            area.x,
-            area.y,
-            &compact,
-            Style::default().fg(Color::White),
-        );
+        buf.set_string(area.x, area.y, &compact, Style::default().fg(Color::White));
     }
 }
 

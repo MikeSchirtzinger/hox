@@ -215,8 +215,14 @@ mod tests {
 
         let storage = MetricsStorage::append_file(&path);
 
-        storage.store(&AgentMetrics::new("agent-1", "change-1")).await.unwrap();
-        storage.store(&AgentMetrics::new("agent-2", "change-2")).await.unwrap();
+        storage
+            .store(&AgentMetrics::new("agent-1", "change-1"))
+            .await
+            .unwrap();
+        storage
+            .store(&AgentMetrics::new("agent-2", "change-2"))
+            .await
+            .unwrap();
 
         let all = storage.load_all().await.unwrap();
         assert_eq!(all.len(), 2);
