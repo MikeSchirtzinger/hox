@@ -627,7 +627,7 @@ async fn cmd_status() -> Result<()> {
             println!("  - {}", c);
 
             // Show what blocks this conflict (Phase 6 power query)
-            let blockers = queries.blocking_conflicts(&c).await.unwrap_or_default();
+            let blockers = queries.blocking_conflicts(c).await.unwrap_or_default();
             if !blockers.is_empty() {
                 println!("    Blocked by: {} conflicting ancestor(s)", blockers.len());
             }
@@ -958,7 +958,7 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 max_iterations,
                 model.into(),
                 max_tokens,
-                &jj.repo_root(),
+                jj.repo_root(),
                 &jj,
                 !no_backpressure,
             )

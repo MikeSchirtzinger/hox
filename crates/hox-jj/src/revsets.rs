@@ -3,6 +3,7 @@
 use hox_core::{ChangeId, Result};
 
 use crate::command::{JjExecutor, JjOutput};
+use crate::validate::{validate_identifier, validate_path, validate_revset};
 
 /// Helper for building and executing revset queries
 pub struct RevsetQueries<E: JjExecutor> {
@@ -40,12 +41,14 @@ impl<E: JjExecutor> RevsetQueries<E> {
     /// Note: When jj-dev is complete, this becomes:
     /// `orchestrator("O-A-1")`
     pub async fn by_orchestrator(&self, orchestrator: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(orchestrator, "orchestrator")?;
         let revset = format!("description(glob:\"Orchestrator: {}\")", orchestrator);
         self.query(&revset).await
     }
 
     /// Find tasks assigned to a specific agent
     pub async fn by_agent(&self, agent: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(agent, "agent")?;
         let revset = format!("description(glob:\"Agent: {}\")", agent);
         self.query(&revset).await
     }
@@ -55,6 +58,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     /// Note: When jj-dev is complete with glob support for msg_to:
     /// `msg_to("O-A-*")`
     pub async fn messages_to(&self, target: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(target, "message target")?;
         // For now, we need to handle wildcards in application code
         // JJ's glob support in description() is limited
         let revset = format!("description(glob:\"Msg-To: {}\")", target);
@@ -75,24 +79,28 @@ impl<E: JjExecutor> RevsetQueries<E> {
 
     /// Find ancestors of a change (what blocks this task)
     pub async fn ancestors(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
+        validate_identifier(change_id, "change_id")?;
         let revset = format!("ancestors({}) & mutable()", change_id);
         self.query(&revset).await
     }
 
     /// Find descendants of a change (what this task blocks)
     pub async fn descendants(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
+        validate_identifier(change_id, "change_id")?;
         let revset = format!("descendants({})", change_id);
         self.query(&revset).await
     }
 
     /// Find tasks by priority
     pub async fn by_priority(&self, priority: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(priority, "priority")?;
         let revset = format!("description(glob:\"Priority: {}\")", priority);
         self.query(&revset).await
     }
 
     /// Find tasks by status
     pub async fn by_status(&self, status: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(status, "status")?;
         let revset = format!("description(glob:\"Status: {}\")", status);
         self.query(&revset).await
     }
@@ -123,6 +131,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `bookmarks(glob:"agent/{name}/task/*")`
     pub async fn agent_tasks_by_bookmark(&self, agent_name: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(agent_name, "agent_name")?;
         let revset = format!(r#"bookmarks(glob:"agent/{}/task/*")"#, agent_name);
         self.query(&revset).await
     }
@@ -131,6 +140,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `bookmarks(glob:"orchestrator/{id}")`
     pub async fn orchestrator_by_bookmark(&self, orch_id: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(orch_id, "orchestrator_id")?;
         let revset = format!(r#"bookmarks(glob:"orchestrator/{}")"#, orch_id);
         self.query(&revset).await
     }
@@ -146,6 +156,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `bookmarks(glob:"session/{id}")`
     pub async fn session_by_bookmark(&self, session_id: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(session_id, "session_id")?;
         let revset = format!(r#"bookmarks(glob:"session/{}")"#, session_id);
         self.query(&revset).await
     }
@@ -166,6 +177,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `bookmarks(glob:"agent/{name}/*") & ~description(glob:"Status: done")`
     pub async fn agent_active_work(&self, agent_name: &str) -> Result<Vec<ChangeId>> {
+        validate_identifier(agent_name, "agent_name")?;
         let revset = format!(
             r#"bookmarks(glob:"agent/{}/*") & ~description(glob:"Status: done")"#,
             agent_name
@@ -185,6 +197,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `ancestors({change_id}) & mutable() & conflicts()`
     pub async fn blocking_conflicts(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
+        validate_identifier(change_id, "change_id")?;
         let revset = format!("ancestors({}) & mutable() & conflicts()", change_id);
         self.query(&revset).await
     }
@@ -200,6 +213,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `file("{path}")`
     pub async fn changes_touching_file(&self, path: &str) -> Result<Vec<ChangeId>> {
+        validate_path(path, "file_path")?;
         let revset = format!(r#"file("{}")"#, path);
         self.query(&revset).await
     }
@@ -208,6 +222,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `present({change_id})`
     pub async fn present(&self, change_id: &ChangeId) -> Result<Option<ChangeId>> {
+        validate_identifier(change_id, "change_id")?;
         let revset = format!("present({})", change_id);
         let results = self.query(&revset).await?;
         Ok(results.into_iter().next())
@@ -217,6 +232,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `connected({change_id})`
     pub async fn connected_component(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
+        validate_identifier(change_id, "change_id")?;
         let revset = format!("connected({})", change_id);
         self.query(&revset).await
     }
@@ -225,6 +241,7 @@ impl<E: JjExecutor> RevsetQueries<E> {
     ///
     /// Revset: `latest({revset}, {count})`
     pub async fn latest(&self, revset: &str, count: usize) -> Result<Vec<ChangeId>> {
+        validate_revset(revset)?;
         let query = format!("latest({}, {})", revset, count);
         self.query(&query).await
     }

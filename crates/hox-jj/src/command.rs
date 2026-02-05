@@ -102,6 +102,12 @@ pub struct MockJjExecutor {
     responses: std::collections::HashMap<String, JjOutput>,
 }
 
+impl Default for MockJjExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockJjExecutor {
     pub fn new() -> Self {
         Self {

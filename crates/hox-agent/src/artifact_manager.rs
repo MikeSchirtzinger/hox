@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use hox_core::{HoxError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 /// Types of validation artifacts
@@ -75,7 +75,7 @@ pub struct ValidationArtifact {
 
 impl ValidationArtifact {
     /// Get absolute path given a base directory
-    pub fn absolute_path(&self, base_dir: &PathBuf) -> PathBuf {
+    pub fn absolute_path(&self, base_dir: &Path) -> PathBuf {
         base_dir.join(&self.path)
     }
 }

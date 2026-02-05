@@ -41,7 +41,7 @@ pub struct ConflictInfo {
 }
 
 /// Report of resolution attempt results
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolutionReport {
     pub total_conflicts: usize,
     pub auto_resolved: usize,
@@ -52,13 +52,7 @@ pub struct ResolutionReport {
 
 impl ResolutionReport {
     pub fn new() -> Self {
-        Self {
-            total_conflicts: 0,
-            auto_resolved: 0,
-            agent_resolved: 0,
-            needs_human: 0,
-            failed: 0,
-        }
+        Self::default()
     }
 }
 

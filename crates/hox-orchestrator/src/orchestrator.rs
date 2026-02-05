@@ -686,8 +686,36 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         self.state = OrchestratorState::Running;
 
-        // Monitor children until all complete
+        // Monitor children until all complete (with timeout)
+        let delegation_start = std::time::Instant::now();
+        let max_delegation_duration = std::time::Duration::from_secs(30 * 60); // 30 minutes
+        let mut poll_count: u64 = 0;
+        let max_polls: u64 = 3600; // 30min at 500ms intervals
+
         while self.has_active_children() {
+            // Timeout guard
+            if delegation_start.elapsed() >= max_delegation_duration || poll_count >= max_polls {
+                let active: Vec<_> = self.children.iter()
+                    .filter(|(_, h)| matches!(h.status, ChildStatus::Running | ChildStatus::Spawning))
+                    .map(|(id, _)| id.to_string())
+                    .collect();
+                warn!(
+                    "Delegation timeout after {:?} ({} polls). Active children: {:?}",
+                    delegation_start.elapsed(), poll_count, active
+                );
+                // Mark remaining active children as failed
+                let active_ids: Vec<_> = self.children.iter()
+                    .filter(|(_, h)| matches!(h.status, ChildStatus::Running | ChildStatus::Spawning))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for child_id in active_ids {
+                    self.update_child_status(&child_id, ChildStatus::Failed(
+                        "Timed out after 30 minutes".to_string()
+                    ));
+                }
+                break;
+            }
+
             // Check status of all children
             let updates = self.check_children_status().await?;
 
@@ -705,6 +733,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
             // Small delay to avoid busy-waiting
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            poll_count += 1;
         }
 
         // All children done -> Integration phase
@@ -728,7 +757,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         // Collect head changes from each child workspace
         let mut child_heads: Vec<ChangeId> = Vec::new();
 
-        for (_child_id, handle) in &self.children {
+        for handle in self.children.values() {
             // Get the final change from child's workspace
             let child_executor = JjCommand::new(&handle.workspace_path);
             let queries = RevsetQueries::new(child_executor);

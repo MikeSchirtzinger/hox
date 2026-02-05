@@ -1,6 +1,6 @@
 # Rust
 /target
-jj-dev/
+**/target/
 Cargo.lock
 
 # IDE
@@ -23,7 +23,6 @@ Thumbs.db
 *.gcda
 *.gcno
 *.backup
-jj-fork/
 
-# JJ fork dev directory
-jj-fork/
+# JJ dev directory (local fork for development)
+jj-dev/

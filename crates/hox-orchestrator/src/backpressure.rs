@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Default timeout for each check command
-const DEFAULT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum total characters of error output to include in the agent prompt.
 const MAX_ERROR_PROMPT_CHARS: usize = 6000;
@@ -107,7 +107,17 @@ pub fn run_checks(
 
         handles
             .into_iter()
-            .map(|h| h.join().expect("check thread panicked"))
+            .map(|h| {
+                match h.join() {
+                    Ok(outcome) => outcome,
+                    Err(_) => CheckOutcome {
+                        name: "unknown".into(),
+                        passed: false,
+                        severity: Severity::Breaking,
+                        output: "Check thread panicked".into(),
+                    },
+                }
+            })
             .collect()
     });
 
@@ -325,12 +335,12 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
     {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!("{} not found, skipping {}", cmd.program, cmd.name);
+            tracing::warn!("{} not found, skipping {} check", cmd.program, cmd.name);
             return CheckOutcome {
                 name: cmd.name.clone(),
                 passed: true,
                 severity: Severity::Warning,
-                output: format!("{} not found, skipping", cmd.program),
+                output: format!("[SKIPPED] {} not found on PATH - {} check not run", cmd.program, cmd.name),
             };
         }
         Err(e) => {
@@ -376,10 +386,15 @@ fn run_check_with_timeout(workspace_path: &Path, cmd: &CheckCommand) -> CheckOut
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+            Err(e) => {
+                tracing::warn!("Error polling {} process: {}", cmd.name, e);
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                // Transient error, retry
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
     };

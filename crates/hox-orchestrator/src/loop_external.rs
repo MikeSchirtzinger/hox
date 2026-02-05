@@ -16,7 +16,7 @@ use hox_agent::{
 };
 use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::{debug, info};
 
 /// Run a single external iteration
@@ -59,7 +59,7 @@ pub async fn run_external_iteration<E: JjExecutor>(
     max_iterations: usize,
     model: Model,
     max_tokens: usize,
-    workspace_path: &PathBuf,
+    workspace_path: &Path,
     executor: &E,
     run_backpressure: bool,
 ) -> Result<ExternalLoopResult> {
@@ -154,7 +154,7 @@ pub async fn run_external_iteration<E: JjExecutor>(
 }
 
 /// Load external loop state from JSON file
-pub async fn load_state(path: &PathBuf) -> Result<ExternalLoopState> {
+pub async fn load_state(path: &Path) -> Result<ExternalLoopState> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| HoxError::Io(format!("Failed to read state file: {}", e)))?;
@@ -164,7 +164,7 @@ pub async fn load_state(path: &PathBuf) -> Result<ExternalLoopState> {
 }
 
 /// Save external loop state to JSON file
-pub async fn save_state(state: &ExternalLoopState, path: &PathBuf) -> Result<()> {
+pub async fn save_state(state: &ExternalLoopState, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| HoxError::Io(format!("Failed to serialize state: {}", e)))?;
 

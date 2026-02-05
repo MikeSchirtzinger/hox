@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Completion promise parsed from agent output
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CompletionPromise {
     /// Whether the agent signaled completion
     pub is_complete: bool,
@@ -32,17 +32,6 @@ pub struct CompletionPromise {
     pub confidence: Option<f32>,
     /// The raw promise block if found
     pub raw_block: Option<String>,
-}
-
-impl Default for CompletionPromise {
-    fn default() -> Self {
-        Self {
-            is_complete: false,
-            reasoning: None,
-            confidence: None,
-            raw_block: None,
-        }
-    }
 }
 
 impl CompletionPromise {
