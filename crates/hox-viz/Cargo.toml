@@ -1,0 +1,46 @@
+[package]
+name = "hox-viz"
+version = "0.1.0"
+edition = "2021"
+description = "3D cyberpunk orchestration visualization for Hox"
+license = "MIT"
+
+[dependencies]
+hox-core = { path = "../hox-core" }
+hox-dashboard = { path = "../hox-dashboard" }
+
+# Web server
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Static file embedding
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# MIME types
+mime_guess = "2"
+
+# Browser opening
+open = "5"
+
+[dev-dependencies]
+tempfile = "3"

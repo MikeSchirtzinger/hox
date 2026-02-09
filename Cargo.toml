@@ -11,6 +11,7 @@ members = [
     "crates/hox-cli",
     "crates/hox-browser",
     "crates/hox-dashboard",
+    "crates/hox-viz",
 ]
 
 resolver = "2"
@@ -82,3 +83,14 @@ hox-evolution = { path = "crates/hox-evolution" }
 hox-planning = { path = "crates/hox-planning" }
 hox-browser = { path = "crates/hox-browser" }
 hox-dashboard = { path = "crates/hox-dashboard" }
+hox-viz = { path = "crates/hox-viz" }
+
+# Web server (for hox-viz)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+async-stream = "0.3"
+mime_guess = "2"
+open = "5"

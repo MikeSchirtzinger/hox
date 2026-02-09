@@ -125,6 +125,25 @@ enum Commands {
         action: LoopCommands,
     },
 
+    /// Launch 3D visualization in browser
+    Viz {
+        /// Port to serve on
+        #[arg(short, long, default_value = "7070")]
+        port: u16,
+
+        /// Refresh interval in milliseconds
+        #[arg(short, long, default_value = "500")]
+        refresh: u64,
+
+        /// Maximum oplog entries
+        #[arg(long, default_value = "100")]
+        max_oplog: usize,
+
+        /// Don't open browser automatically
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Launch the observability dashboard
     Dashboard {
         /// Refresh interval in milliseconds
@@ -430,6 +449,12 @@ async fn main() -> Result<()> {
             orchestrator,
         } => cmd_set(priority, status, agent, orchestrator).await,
         Commands::Loop { action } => cmd_loop(action).await,
+        Commands::Viz {
+            port,
+            refresh,
+            max_oplog,
+            no_open,
+        } => cmd_viz(port, refresh, max_oplog, no_open).await,
         Commands::Dashboard { refresh, max_oplog } => cmd_dashboard(refresh, max_oplog).await,
         Commands::Bookmark { action } => cmd_bookmark(action).await,
         Commands::Rollback {
@@ -1038,6 +1063,18 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_viz(port: u16, refresh_ms: u64, max_oplog: usize, no_open: bool) -> Result<()> {
+    let config = hox_viz::VizConfig {
+        port,
+        refresh_ms,
+        max_oplog,
+        open_browser: !no_open,
+    };
+
+    hox_viz::run(config).await?;
     Ok(())
 }
 
