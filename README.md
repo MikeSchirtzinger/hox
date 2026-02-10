@@ -13,6 +13,8 @@ State        = change descriptions (structured metadata + handoff context)
 
 The VCS is the source of truth. Everything else is a read cache.
 
+![Hox Architecture](docs/01_hox_architecture.png)
+
 ## Why
 
 Long-running AI agents drift. They hallucinate context, lose track of what they've done, and degrade over time. Hox solves this with two ideas:
@@ -40,6 +42,8 @@ hox viz              # 3D graph in browser
 ```
 
 ## The Ralph Loop
+
+![Ralph Loop](docs/02_ralph_loop.png)
 
 The core execution engine. Each iteration:
 
@@ -143,6 +147,8 @@ hox viz --port 7070 --refresh 500
 ```
 
 ## Validation & Evolution
+
+![Self-Evolution](docs/03_self_evolution.png)
 
 ### Byzantine Consensus
 
