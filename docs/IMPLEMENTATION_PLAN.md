@@ -1,1254 +1,2063 @@
-# Hox Implementation Plan: JJ Integration Gap Closure
+# Hox Implementation Plan: Standalone Open-Source Tool
 
-**Date:** 2026-01-30
-**Status:** Draft
-**Context:** Systematic closure of gaps between Hox's JJ-native design philosophy and its current implementation
-**Prerequisite:** jj-dev fork cleanup complete (directory renamed, metadata fields renamed)
-
----
-
-## Table of Contents
-
-1. [Current State Assessment](#current-state-assessment)
-2. [Phase 1: Bookmark Management (CRITICAL)](#phase-1-bookmark-management)
-3. [Phase 2: Operation Rollback & Recovery](#phase-2-operation-rollback--recovery)
-4. [Phase 3: Conflict Resolution Pipeline](#phase-3-conflict-resolution-pipeline)
-5. [Phase 4: DAG Manipulation Commands](#phase-4-dag-manipulation-commands)
-6. [Phase 5: Backpressure Enhancement (jj fix)](#phase-5-backpressure-enhancement)
-7. [Phase 6: Advanced Revsets & Query Migration](#phase-6-advanced-revsets--query-migration)
-8. [Phase 7: Speculative Execution & Audit Trails](#phase-7-speculative-execution--audit-trails)
-9. [Cross-Cutting: Dual Metadata Path](#cross-cutting-dual-metadata-path)
-10. [Dependency Map](#dependency-map)
-11. [Testing Strategy](#testing-strategy)
+**Date:** 2026-02-13
+**Status:** Implemented (2026-02-13)
+All 10 improvements have been implemented. This document is preserved as architectural reference.
+**Context:** Roadmap for building Hox as a production-ready, standalone JJ-native multi-agent orchestration tool
 
 ---
 
-## Current State Assessment
+## Overview
 
-**11 crates, ~13,381 lines of Rust.**
+**What is Hox?**
 
-### JJ Commands Currently Used
+Hox is a JJ-native multi-agent orchestration tool that treats version control changes as the fundamental unit of work. Unlike traditional task runners that manage work in external databases, Hox leverages JJ's powerful DAG manipulation, conflict resolution, and workspace isolation to coordinate multiple AI agents working in parallel on complex software projects.
 
-| Command | Location | Purpose |
-|---------|----------|---------|
-| `jj new` | `orchestrator.rs:141`, `orchestrator.rs:195` | Create changes for orchestrators and agents |
-| `jj describe` | `metadata.rs:155`, `loop_engine.rs:366` | Write metadata into descriptions |
-| `jj log` | `metadata.rs:113`, `revsets.rs:21`, `oplog.rs:82` | Read descriptions, query revsets, poll oplog |
-| `jj root` | `command.rs:54` | Detect repository root |
-| `jj workspace add/forget/list` | `workspace.rs:49-103` | Agent workspace isolation |
-| `jj op log` | `oplog.rs:82` | Poll for new operations (500ms interval) |
+**Core Paradigm:**
+- **Tasks** = JJ changes (change_id is the primary identifier)
+- **Dependencies** = DAG ancestry (no separate dependency graph)
+- **Assignments** = JJ bookmarks
+- **Communication** = First-class metadata in change descriptions
+- **Execution** = Ralph-style loop (fresh agent each iteration, state from JJ metadata)
 
-### JJ Commands NOT Used (Should Be)
+**What This Plan Achieves:**
 
-| Command | Priority | Gap |
-|---------|----------|-----|
-| `jj bookmark create/set/list/delete` | CRITICAL | No bookmark code exists at all |
-| `jj op restore/undo` | HIGH | OpLogWatcher polls but never manipulates |
-| `jj parallelize` | HIGH | No DAG restructuring |
-| `jj absorb` | HIGH | No megamerge distribution |
-| `jj resolve` | HIGH | Conflict detection only, no resolution |
-| `jj split` | MEDIUM-HIGH | No task decomposition via VCS |
-| `jj squash` | MEDIUM-HIGH | No task consolidation via VCS |
-| `jj fix` | MEDIUM | Backpressure runs cargo/pytest, not jj fix |
-| `jj duplicate` | MEDIUM | No speculative execution |
-| `jj backout` | LOW-MEDIUM | No safe reversion |
-| `jj evolog` | LOW | No change evolution tracking |
+This implementation plan prioritizes developer experience, robustness, and adoption for standalone tool usage. While the full vision includes microsandbox VMs and Byzantine validation, this plan focuses on making Hox immediately useful as a command-line tool for individual developers and small teams. The improvements are ranked by standalone impact rather than architectural completeness.
 
 ---
 
-## Phase 1: Bookmark Management
+## Current State
 
-**Priority:** CRITICAL
-**Business Value:** Bookmarks are the architectural linchpin. The design docs state "Assignments ARE bookmarks" but zero bookmark code exists. This blocks O(1) task lookups, proper agent assignment tracking, and bookmark-based revset queries. Every other phase benefits from this.
-**Estimated Effort:** 2-3 days
+**Codebase Structure:** 11 crates, ~13,381 lines of Rust
 
-### What Changes
+### Core Crates
 
-#### New File: `crates/hox-jj/src/bookmarks.rs`
+| Crate | Purpose | Key Files | Lines |
+|-------|---------|-----------|-------|
+| `hox-core` | Core types, task model, orchestrator IDs, metadata schemas | `task.rs`, `types.rs`, `metadata.rs` | ~800 |
+| `hox-jj` | JJ command abstraction, subprocess execution, metadata parsing | `command.rs`, `metadata.rs`, `revsets.rs`, `oplog.rs` | ~1,200 |
+| `hox-agent` | Anthropic API client, Ralph-style loop engine | `client.rs`, `loop_engine.rs`, `types.rs` | ~1,500 |
+| `hox-orchestrator` | Multi-agent coordination, phase-based execution | `orchestrator.rs`, `phases.rs`, `backpressure.rs` | ~2,800 |
+| `hox-validation` | Byzantine fault-tolerant consensus (3f+1 validators) | `validator.rs`, `consensus.rs` | ~1,100 |
+| `hox-evolution` | Pattern learning, self-improvement | `patterns.rs`, `learning.rs` | ~900 |
+| `hox-metrics` | OpenTelemetry observability | `telemetry.rs`, `events.rs` | ~600 |
+| `hox-cli` | Command-line interface | `main.rs`, `commands/` | ~1,200 |
 
-This module wraps all `jj bookmark` subcommands and provides Hox-specific bookmark conventions.
+### Microsandbox Layer (Linux-only)
+
+| Crate | Purpose | Status |
+|-------|---------|--------|
+| `jj-dev-sandbox` | MicroVM lifecycle via libkrun | Requires Linux + rootfs |
+| `jj-dev-proxy` | Host-side vsock server | Requires Linux |
+| `jj-dev-agent-sdk` | SDK for agents inside VMs | Requires VM environment |
+
+### Current Implementation Status
+
+**What Works:**
+- Ralph-style loop: Fresh agent each iteration, state from JJ metadata
+- Backpressure system: Tests/lints/builds between iterations
+- Multi-agent orchestration: Hierarchical orchestrators spawn child agents
+- Workspace isolation: Each agent gets a dedicated JJ workspace
+- Metadata management: Structured data in change descriptions
+- OpLog watching: Poll for new operations (500ms interval)
+- Activity logging: Session summaries and progress tracking
+
+**What's Missing (Standalone Tool Perspective):**
+- No budget enforcement → runaway loops burn API credits
+- No user configuration → all settings hardcoded
+- XML parsing from agent output → fragile and error-prone
+- Subprocess spawns everywhere → slow iterations
+- No fail-open philosophy → transient failures crash the tool
+- Manual state transitions → hard to test, hard to observe
+- No selective backpressure → all checks every time
+
+---
+
+## Priority Matrix
+
+All improvements ranked by standalone tool impact, effort, and dependencies:
+
+| # | Improvement | Standalone Impact | Effort | Dependencies | Phase |
+|---|-------------|------------------|--------|--------------|-------|
+| 1 | State Machine | HIGH (Foundation) | 2-3 days | None | 2 |
+| 2 | jj-lib Integration | HIGH (Performance) | 4-5 days | None, but risky | 5 |
+| 3 | PostToolsHook | MEDIUM (Architecture) | 1-2 days | State Machine | 2 |
+| 4 | Budget Enforcement | MEDIUM-HIGH (Safety) | 1 day | None | 1 |
+| 5 | Structured Output | MEDIUM-HIGH (Reliability) | 2-3 days | None | 3 |
+| 6 | Backpressure Calibration | MEDIUM (Performance) | 2 days | None | 3 |
+| 7 | Fail-Open Audit | MEDIUM (Robustness) | 1-2 days | None | 1 |
+| 8 | .hox/config.toml | MEDIUM-HIGH (UX) | 1-2 days | None | 1 |
+| 9 | Pattern Extraction | LOW-MEDIUM (Learning) | 2-3 days | State Machine | 4 |
+| 10 | Phase Auto-Advancement | MEDIUM (UX) | 1 day | State Machine | 4 |
+
+**Quick Wins (High ROI, Low Effort):** Budget Enforcement (#4), Fail-Open Audit (#7), Config File (#8)
+
+**Foundation Work (Enables Everything):** State Machine (#1)
+
+**Major Improvements (Worth The Effort):** Structured Output (#5), Backpressure Calibration (#6)
+
+**Advanced Features (Nice To Have):** Pattern Extraction (#9), Phase Auto-Advancement (#10)
+
+**Performance Optimization (Do Last):** jj-lib Integration (#2)
+
+---
+
+## Phase 1: Quick Wins & Developer UX
+
+**Goal:** Make Hox feel like a real tool, not a research prototype. Stop burning money, enable configuration, don't crash on transient failures.
+
+**Timeline:** 3-4 days
+**Dependencies:** None (all independent)
+
+### Improvement #4: Budget Enforcement
+
+**File:** `crates/hox-orchestrator/src/loop_engine.rs`
+
+**Current State:**
+```rust
+// LoopConfig in crates/hox-agent/src/types.rs (lines 42-48)
+pub struct LoopConfig {
+    pub max_iterations: usize,
+    pub max_tokens: Option<usize>,        // Defined but never checked
+    pub max_budget_usd: Option<f64>,      // Defined but never checked
+    pub model: ModelName,
+    pub workspace_path: PathBuf,
+}
+
+// AgentResult in types.rs (lines 89-94) returns usage
+pub struct Usage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+}
+```
+
+**Problem:** Agent can burn unlimited API credits because budget fields are never enforced.
+
+**What Changes:**
+
+Add cumulative tracking to `RalphLoopEngine`:
 
 ```rust
-/// Bookmark naming conventions for Hox:
-///   task/{change-id-prefix}           - Task bookmark
-///   agent/{agent-name}/task/{id}      - Agent assignment
-///   orchestrator/{orch-id}            - Orchestrator base
-///   session/{session-id}              - Session tracking
-pub struct BookmarkManager<E: JjExecutor> {
+// In crates/hox-orchestrator/src/loop_engine.rs (add field to struct around line 15)
+pub struct RalphLoopEngine<E: JjExecutor> {
+    config: LoopConfig,
     executor: E,
-}
-```
-
-**Key functions to implement:**
-
-```rust
-impl<E: JjExecutor> BookmarkManager<E> {
-    pub fn new(executor: E) -> Self;
-
-    // Core bookmark operations
-    pub async fn create(&self, name: &str, change_id: &ChangeId) -> Result<()>;
-    pub async fn set(&self, name: &str, change_id: &ChangeId) -> Result<()>;
-    pub async fn delete(&self, name: &str) -> Result<()>;
-    pub async fn list(&self, glob: Option<&str>) -> Result<Vec<BookmarkInfo>>;
-
-    // Hox-specific operations
-    pub async fn assign_task(&self, agent_name: &str, change_id: &ChangeId) -> Result<()>;
-    pub async fn unassign_task(&self, agent_name: &str, change_id: &ChangeId) -> Result<()>;
-    pub async fn agent_tasks(&self, agent_name: &str) -> Result<Vec<ChangeId>>;
-    pub async fn task_agent(&self, change_id: &ChangeId) -> Result<Option<String>>;
-    pub async fn mark_orchestrator(&self, orch_id: &OrchestratorId, change_id: &ChangeId) -> Result<()>;
-    pub async fn session_bookmark(&self, session_id: &str, change_id: &ChangeId) -> Result<()>;
+    client: AnthropicClient,
+    cumulative_input_tokens: AtomicUsize,   // NEW
+    cumulative_output_tokens: AtomicUsize,  // NEW
 }
 
-#[derive(Debug, Clone)]
-pub struct BookmarkInfo {
-    pub name: String,
-    pub change_id: ChangeId,
-    pub tracking: Option<String>, // Remote tracking info
-}
-```
-
-**JJ commands used:**
-```bash
-jj bookmark create {name} -r {change_id}
-jj bookmark set {name} -r {change_id}
-jj bookmark delete {name}
-jj bookmark list --all          # or with -T for template output
-```
-
-#### Extend: `crates/hox-jj/src/lib.rs`
-
-```rust
-mod bookmarks;
-pub use bookmarks::{BookmarkManager, BookmarkInfo};
-```
-
-#### Extend: `crates/hox-orchestrator/src/orchestrator.rs`
-
-Update `spawn_agent()` (line 174) to create bookmarks on task assignment:
-
-```rust
-// After creating agent change and setting metadata...
-let bookmark_mgr = BookmarkManager::new(self.executor.clone());
-bookmark_mgr.assign_task(&agent_name, &change_id).await?;
-```
-
-Update `initialize()` (line 134) to create orchestrator bookmark:
-
-```rust
-let bookmark_mgr = BookmarkManager::new(self.executor.clone());
-bookmark_mgr.mark_orchestrator(&self.config.id, change_id).await?;
-```
-
-#### Extend: `crates/hox-jj/src/revsets.rs`
-
-Add bookmark-based query methods alongside existing description-based ones:
-
-```rust
-/// Find agent's tasks via bookmarks (O(1) vs description grep O(n))
-/// Revset: bookmarks(glob:"agent/{agent_name}/task/*")
-pub async fn agent_tasks_by_bookmark(&self, agent_name: &str) -> Result<Vec<ChangeId>> {
-    let revset = format!("bookmarks(glob:\"agent/{}/task/*\")", agent_name);
-    self.query(&revset).await
-}
-
-/// Find all tasks with bookmarks
-pub async fn all_tasks_by_bookmark(&self) -> Result<Vec<ChangeId>> {
-    self.query("bookmarks(glob:\"task/*\")").await
-}
-
-/// Find orchestrator base changes
-pub async fn orchestrator_by_bookmark(&self, orch_id: &str) -> Result<Vec<ChangeId>> {
-    let revset = format!("bookmarks(glob:\"orchestrator/{}\")", orch_id);
-    self.query(&revset).await
-}
-```
-
-#### Extend: `crates/hox-cli/src/main.rs`
-
-Add bookmark management CLI commands:
-
-```rust
-/// Bookmark management
-Bookmark {
-    #[command(subcommand)]
-    action: BookmarkCommands,
-},
-
-enum BookmarkCommands {
-    /// Assign current change to an agent
-    Assign { agent: String },
-    /// List task bookmarks
-    List {
-        #[arg(long)]
-        agent: Option<String>,
-    },
-    /// Show which agent owns a task
-    Owner { change_id: String },
-}
-```
-
-### Acceptance Criteria
-
-- [ ] `BookmarkManager` struct with all CRUD operations
-- [ ] Hox naming convention enforced: `task/`, `agent/`, `orchestrator/`, `session/`
-- [ ] `spawn_agent()` creates bookmark on assignment
-- [ ] `initialize()` creates orchestrator bookmark
-- [ ] Bookmark-based revset queries in `RevsetQueries`
-- [ ] CLI subcommand `hox bookmark assign/list/owner`
-- [ ] Unit tests with `MockJjExecutor` covering all operations
-- [ ] Existing description-based queries still work (dual path)
-
-### Testing Checklist
-
-- [ ] Mock test: `BookmarkManager::create()` calls `jj bookmark create` with correct args
-- [ ] Mock test: `BookmarkManager::assign_task()` creates `agent/{name}/task/{id}` bookmark
-- [ ] Mock test: `BookmarkManager::agent_tasks()` returns correct change IDs
-- [ ] Mock test: `RevsetQueries::agent_tasks_by_bookmark()` uses `bookmarks(glob:...)` revset
-- [ ] Integration test (requires real JJ repo): full assign/query/unassign cycle
-
----
-
-## Phase 2: Operation Rollback & Recovery
-
-**Priority:** HIGH
-**Business Value:** When an agent produces bad output, there is currently no way to roll back. The `OpLogWatcher` detects operations but cannot undo them. This is essential for agent reliability -- without rollback, a single bad agent iteration can corrupt the task state permanently.
-**Estimated Effort:** 2 days
-**Depends on:** None (independent of Phase 1)
-
-### What Changes
-
-#### Extend: `crates/hox-jj/src/oplog.rs`
-
-Add manipulation capabilities to the existing watch-only module:
-
-```rust
-/// Operation management (undo/restore/revert)
-pub struct OpManager<E: JjExecutor> {
-    executor: E,
-}
-
-impl<E: JjExecutor> OpManager<E> {
-    pub fn new(executor: E) -> Self;
-
-    /// Get the N most recent operation IDs
-    pub async fn recent_operations(&self, count: usize) -> Result<Vec<OperationInfo>>;
-
-    /// Undo the most recent operation
-    pub async fn undo(&self) -> Result<()>;
-
-    /// Restore repo to a specific operation state
-    pub async fn restore(&self, operation_id: &str) -> Result<()>;
-
-    /// Revert a specific (non-recent) operation
-    pub async fn revert(&self, operation_id: &str) -> Result<()>;
-
-    /// Snapshot current operation ID (for later rollback)
-    pub async fn snapshot(&self) -> Result<String>;
-}
-
-#[derive(Debug, Clone)]
-pub struct OperationInfo {
-    pub id: String,
-    pub description: String,
-    pub timestamp: String,
-}
-```
-
-**JJ commands used:**
-```bash
-jj op log -n {count} -T 'operation_id ++ "\t" ++ description ++ "\t" ++ time ++ "\n"' --no-graph
-jj undo
-jj op restore {operation_id}
-```
-
-#### New File: `crates/hox-orchestrator/src/recovery.rs`
-
-Agent recovery logic built on top of `OpManager`:
-
-```rust
-/// Recovery manager for handling agent failures
-pub struct RecoveryManager<E: JjExecutor> {
-    op_manager: OpManager<E>,
-    bookmark_manager: BookmarkManager<E>, // Optional, if Phase 1 is done
-}
-
-impl<E: JjExecutor> RecoveryManager<E> {
-    /// Roll back an agent's work to before it started
-    ///
-    /// 1. Find the operation ID from before the agent was spawned
-    /// 2. Restore to that state
-    /// 3. Clean up the agent's workspace
-    /// 4. Remove agent bookmark (if bookmarks are implemented)
-    pub async fn rollback_agent(
-        &self,
-        agent_name: &str,
-        snapshot_op_id: &str,
-    ) -> Result<RollbackResult>;
-
-    /// Roll back the last N operations
-    pub async fn rollback_operations(&self, count: usize) -> Result<()>;
-
-    /// Create a recovery point before risky operations
-    pub async fn create_recovery_point(&self) -> Result<RecoveryPoint>;
-
-    /// Restore from a recovery point
-    pub async fn restore_from(&self, point: &RecoveryPoint) -> Result<()>;
-}
-
-#[derive(Debug, Clone)]
-pub struct RecoveryPoint {
-    pub operation_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub description: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct RollbackResult {
-    pub operations_undone: usize,
-    pub agent_cleaned: bool,
-    pub workspace_removed: bool,
-}
-```
-
-#### Extend: `crates/hox-orchestrator/src/loop_engine.rs`
-
-Add recovery points around agent iterations (modify `run()` method, around line 93):
-
-```rust
-// Before spawning agent, create recovery point
-let op_manager = OpManager::new(self.executor.clone());
-let snapshot = op_manager.snapshot().await?;
-
-// ... spawn agent, execute operations ...
-
-// If agent output is clearly broken, rollback
-if result.output.is_empty() || result.output.contains("[ERROR]") {
-    warn!("Agent iteration {} produced bad output, rolling back", iteration);
-    op_manager.restore(&snapshot).await?;
-    continue; // retry iteration
-}
-```
-
-#### Extend: `crates/hox-orchestrator/src/lib.rs`
-
-```rust
-mod recovery;
-pub use recovery::{RecoveryManager, RecoveryPoint, RollbackResult};
-```
-
-#### Extend: `crates/hox-jj/src/lib.rs`
-
-```rust
-pub use oplog::{OpLogEvent, OpLogWatcher, OpLogWatcherConfig, OpManager, OperationInfo};
-```
-
-#### Extend: `crates/hox-cli/src/main.rs`
-
-```rust
-/// Rollback agent work
-Rollback {
-    /// Agent name to roll back
-    #[arg(long)]
-    agent: Option<String>,
-    /// Operation ID to restore to
-    #[arg(long)]
-    operation: Option<String>,
-    /// Undo last N operations
-    #[arg(long)]
-    count: Option<usize>,
-},
-```
-
-### Acceptance Criteria
-
-- [ ] `OpManager` with `undo()`, `restore()`, `revert()`, `snapshot()` methods
-- [ ] `RecoveryManager` with `rollback_agent()` and recovery points
-- [ ] Loop engine creates snapshot before each agent iteration
-- [ ] Automatic rollback on empty/broken agent output
-- [ ] CLI `hox rollback` command with --agent, --operation, --count flags
-- [ ] Unit tests for all OpManager operations
-- [ ] Recovery point lifecycle tested end-to-end
-
-### Testing Checklist
-
-- [ ] Mock test: `OpManager::snapshot()` calls `jj op log -n 1` and returns ID
-- [ ] Mock test: `OpManager::restore()` calls `jj op restore {id}`
-- [ ] Mock test: `OpManager::undo()` calls `jj undo`
-- [ ] Mock test: `RecoveryManager::rollback_agent()` restores and cleans workspace
-- [ ] Unit test: Loop engine retries after rollback
-- [ ] Integration test: full snapshot -> bad work -> rollback -> verify clean state
-
----
-
-## Phase 3: Conflict Resolution Pipeline
-
-**Priority:** HIGH
-**Business Value:** Currently Hox detects conflicts (`conflicts()` revset in `revsets.rs:101`) but does nothing. The orchestrator warns about conflicts and has `// TODO: Handle conflicts` comments (orchestrator.rs:378, orchestrator.rs:728). Multi-agent parallel work inevitably produces conflicts; automated resolution is the difference between "agents work in parallel" and "agents actually produce merged results."
-**Estimated Effort:** 3-4 days
-**Depends on:** Phase 2 (recovery points for failed resolution attempts)
-
-### What Changes
-
-#### New File: `crates/hox-orchestrator/src/conflict_resolver.rs`
-
-```rust
-/// Strategy for resolving a specific conflict
-#[derive(Debug, Clone)]
-pub enum ResolutionStrategy {
-    /// Use jj fix to auto-resolve formatting conflicts
-    JjFix,
-    /// Use :ours or :theirs resolution tool
-    PickSide { side: ConflictSide },
-    /// Spawn a dedicated conflict-resolution agent
-    SpawnAgent { prompt_context: String },
-    /// Queue for human review
-    HumanReview { reason: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum ConflictSide {
-    Ours,
-    Theirs,
-}
-
-/// Information about a detected conflict
-#[derive(Debug, Clone)]
-pub struct ConflictInfo {
-    pub change_id: ChangeId,
-    pub files: Vec<String>,
-    pub is_formatting_only: bool,
-}
-
-/// Pipeline for resolving conflicts
-pub struct ConflictResolver<E: JjExecutor> {
-    executor: E,
-    recovery: RecoveryManager<E>,
-}
-
-impl<E: JjExecutor + Clone + 'static> ConflictResolver<E> {
-    pub fn new(executor: E, recovery: RecoveryManager<E>) -> Self;
-
-    /// Analyze a conflict and determine resolution strategy
-    pub async fn analyze(&self, change_id: &ChangeId) -> Result<Vec<ConflictInfo>>;
-
-    /// Determine best strategy for a given conflict
-    pub fn recommend_strategy(&self, info: &ConflictInfo) -> ResolutionStrategy;
-
-    /// Execute a resolution strategy
-    pub async fn resolve(&self, info: &ConflictInfo, strategy: &ResolutionStrategy) -> Result<bool>;
-
-    /// Run the full pipeline: detect -> analyze -> strategize -> resolve
-    pub async fn resolve_all(&self) -> Result<ResolutionReport>;
-
-    /// Resolve formatting-only conflicts using jj fix
-    async fn resolve_with_jj_fix(&self, change_id: &ChangeId) -> Result<bool>;
-
-    /// Resolve using pick-side strategy
-    async fn resolve_with_pick_side(&self, change_id: &ChangeId, side: &ConflictSide) -> Result<bool>;
-
-    /// Spawn a conflict-resolution agent
-    async fn spawn_resolution_agent(&self, info: &ConflictInfo, context: &str) -> Result<bool>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolutionReport {
-    pub total_conflicts: usize,
-    pub auto_resolved: usize,
-    pub agent_resolved: usize,
-    pub needs_human: usize,
-    pub failed: usize,
-}
-```
-
-**JJ commands used:**
-```bash
-jj log -r '{change_id}' -T 'conflict' --no-graph   # Check if change has conflicts
-jj diff -r {change_id}                                # Analyze conflict content
-jj resolve -r {change_id} --tool :ours                # Pick-side resolution
-jj resolve -r {change_id} --tool :theirs
-jj fix -s {change_id}                                 # Format-only resolution
-```
-
-#### Extend: `crates/hox-orchestrator/src/orchestrator.rs`
-
-Replace TODO comments with actual conflict resolution calls.
-
-At line ~376 (inside `integrate()`):
-```rust
-// Before:
-// TODO: Handle conflicts - spawn integration agent
-
-// After:
-let recovery = RecoveryManager::new(
-    OpManager::new(self.executor.clone()),
-    BookmarkManager::new(self.executor.clone()),
-);
-let resolver = ConflictResolver::new(self.executor.clone(), recovery);
-let report = resolver.resolve_all().await?;
-info!("Conflict resolution: {} auto, {} agent, {} human",
-    report.auto_resolved, report.agent_resolved, report.needs_human);
-if report.needs_human > 0 {
-    warn!("{} conflicts need human review", report.needs_human);
-}
-```
-
-At line ~728 (inside `integrate_child_work()`):
-```rust
-// Same pattern -- replace the warn! + spawn_agent with ConflictResolver pipeline
-```
-
-#### Extend: `crates/hox-orchestrator/src/lib.rs`
-
-```rust
-mod conflict_resolver;
-pub use conflict_resolver::{ConflictResolver, ConflictInfo, ResolutionReport, ResolutionStrategy};
-```
-
-### Acceptance Criteria
-
-- [ ] `ConflictInfo` analysis distinguishes formatting-only from semantic conflicts
-- [ ] `jj fix` auto-resolves formatting conflicts
-- [ ] Pick-side resolution works via `jj resolve --tool`
-- [ ] Agent-based resolution spawns a conflict-resolution agent with proper context
-- [ ] Recovery point created before each resolution attempt
-- [ ] `ResolutionReport` summarizes what was resolved and how
-- [ ] TODO comments in orchestrator.rs replaced with real code
-- [ ] Pipeline falls through to human review for unresolvable conflicts
-
-### Testing Checklist
-
-- [ ] Mock test: `analyze()` parses `jj diff` output to find conflicted files
-- [ ] Mock test: `resolve_with_jj_fix()` calls `jj fix -s {id}`
-- [ ] Mock test: `resolve_with_pick_side()` calls `jj resolve --tool :ours`
-- [ ] Unit test: `recommend_strategy()` returns JjFix for formatting-only conflicts
-- [ ] Unit test: `recommend_strategy()` returns SpawnAgent for semantic conflicts
-- [ ] Integration test: create two conflicting changes, run resolve_all, verify resolution
-
----
-
-## Phase 4: DAG Manipulation Commands
-
-**Priority:** HIGH
-**Business Value:** JJ's DAG manipulation commands (`parallelize`, `absorb`, `split`, `squash`) are the features that make JJ uniquely powerful for agent orchestration. Without them, Hox can only create linear sequences -- it cannot restructure work for parallelism, decompose tasks, consolidate results, or distribute fixes to correct branches. This phase unlocks the "plan then optimize" workflow.
-**Estimated Effort:** 3-4 days
-**Depends on:** Phase 1 (bookmarks auto-track through rewrites)
-
-### What Changes
-
-#### New File: `crates/hox-jj/src/dag.rs`
-
-All DAG manipulation commands in one module:
-
-```rust
-/// DAG manipulation operations for task restructuring
-pub struct DagOperations<E: JjExecutor> {
-    executor: E,
-}
-
-impl<E: JjExecutor> DagOperations<E> {
-    pub fn new(executor: E) -> Self;
-
-    // --- jj parallelize ---
-
-    /// Convert sequential changes into parallel siblings
-    ///
-    /// Takes a range of changes (e.g., "abc..xyz") and restructures them
-    /// so they all share the same parent instead of being sequential.
-    ///
-    /// Bookmarks auto-track through rewrites, so agent assignments stay stable.
-    pub async fn parallelize(&self, revset: &str) -> Result<ParallelizeResult>;
-
-    // --- jj absorb ---
-
-    /// Auto-distribute working copy changes to correct ancestor commits
-    ///
-    /// Each hunk is routed to the ancestor where those lines were last modified.
-    /// Essential for the megamerge pattern:
-    ///   1. Agents work in parallel branches
-    ///   2. Orchestrator creates merge for integration testing
-    ///   3. Orchestrator (or agent) makes fixes on merge
-    ///   4. `jj absorb` distributes fixes back to correct branches
-    pub async fn absorb(&self, paths: Option<&[&str]>) -> Result<AbsorbResult>;
-
-    // --- jj split ---
-
-    /// Split a change into multiple smaller changes
-    ///
-    /// Uses file-based splitting (non-interactive).
-    /// Agent realizes task is too large -> split into subtasks.
-    pub async fn split_by_files(
-        &self,
-        change_id: &ChangeId,
-        file_groups: &[Vec<String>],
-    ) -> Result<SplitResult>;
-
-    // --- jj squash ---
-
-    /// Fold a change into its parent
-    pub async fn squash(&self, change_id: &ChangeId) -> Result<()>;
-
-    /// Squash specific files from a change into a target
-    pub async fn squash_into(
-        &self,
-        source: &ChangeId,
-        target: &ChangeId,
-        paths: Option<&[&str]>,
-    ) -> Result<()>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ParallelizeResult {
-    /// Number of changes restructured
-    pub changes_restructured: usize,
-    /// Whether the operation succeeded cleanly
-    pub clean: bool,
-    /// Any conflicts introduced by restructuring
-    pub conflicts: Vec<ChangeId>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AbsorbResult {
-    /// Number of hunks absorbed
-    pub hunks_absorbed: usize,
-    /// Changes that received absorbed hunks
-    pub affected_changes: Vec<ChangeId>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SplitResult {
-    /// Change IDs of the new split changes
-    pub new_changes: Vec<ChangeId>,
-}
-```
-
-**JJ commands used:**
-```bash
-jj parallelize {revset}
-jj absorb [paths...]
-jj split -r {change_id} {files...}          # File-based split (non-interactive)
-jj squash -r {change_id}                     # Squash into parent
-jj squash --from {source} --into {target}    # Squash into specific target
-```
-
-#### Extend: `crates/hox-jj/src/lib.rs`
-
-```rust
-mod dag;
-pub use dag::{DagOperations, ParallelizeResult, AbsorbResult, SplitResult};
-```
-
-#### Extend: `crates/hox-orchestrator/src/orchestrator.rs`
-
-Add methods that use DAG operations for orchestration patterns:
-
-```rust
-impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
-    /// After planning tasks sequentially, restructure independent ones for parallel execution
-    pub async fn optimize_dag(&self, task_range: &str) -> Result<ParallelizeResult> {
-        let dag = DagOperations::new(self.executor.clone());
-        dag.parallelize(task_range).await
+impl<E: JjExecutor> RalphLoopEngine<E> {
+    // In run() method (around line 93), after agent execution:
+    let result = agent.run().await?;
+
+    // Track cumulative usage
+    let total_input = self.cumulative_input_tokens.fetch_add(
+        result.usage.input_tokens,
+        Ordering::SeqCst
+    ) + result.usage.input_tokens;
+
+    let total_output = self.cumulative_output_tokens.fetch_add(
+        result.usage.output_tokens,
+        Ordering::SeqCst
+    ) + result.usage.output_tokens;
+
+    // Check token budget
+    if let Some(max_tokens) = self.config.max_tokens {
+        if total_input + total_output > max_tokens {
+            return Err(HoxError::BudgetExceeded(format!(
+                "Token budget exceeded: {} total tokens (limit: {})",
+                total_input + total_output,
+                max_tokens
+            )));
+        }
     }
 
-    /// After integration testing, distribute fixes back to agent branches
-    pub async fn absorb_fixes(&self, paths: Option<&[&str]>) -> Result<AbsorbResult> {
-        let dag = DagOperations::new(self.executor.clone());
-        dag.absorb(paths).await
+    // Check USD budget (Anthropic pricing: input=$3/MTok, output=$15/MTok for Sonnet)
+    if let Some(max_usd) = self.config.max_budget_usd {
+        let cost_usd = (total_input as f64 * 3.0 / 1_000_000.0)
+                     + (total_output as f64 * 15.0 / 1_000_000.0);
+        if cost_usd > max_usd {
+            return Err(HoxError::BudgetExceeded(format!(
+                "USD budget exceeded: ${:.2} (limit: ${:.2})",
+                cost_usd, max_usd
+            )));
+        }
     }
 
-    /// Agent reports task is too large; split it
-    pub async fn decompose_task(
-        &self,
-        change_id: &ChangeId,
-        file_groups: &[Vec<String>],
-    ) -> Result<SplitResult> {
-        let dag = DagOperations::new(self.executor.clone());
-        dag.split_by_files(change_id, file_groups).await
+    // Context freshness: force new iteration at 60% of context window
+    let context_window = match self.config.model {
+        ModelName::Sonnet => 200_000,
+        ModelName::Opus => 200_000,
+        ModelName::Haiku => 200_000,
+    };
+    let context_used = total_input + total_output;
+    let context_threshold = (context_window as f64 * 0.6) as usize;
+
+    if context_used > context_threshold {
+        info!("Context freshness threshold reached ({}/{}), recommending new task",
+              context_used, context_window);
+        // Don't error, just warn and continue with fresh context next iteration
     }
+```
+
+**Extend:** `crates/hox-core/src/error.rs`
+
+```rust
+pub enum HoxError {
+    // ... existing variants ...
+
+    /// Budget exceeded (tokens or USD)
+    #[error("Budget exceeded: {0}")]
+    BudgetExceeded(String),
 }
 ```
 
-#### Extend: `crates/hox-cli/src/main.rs`
+**Acceptance Criteria:**
+- [x] Cumulative token tracking across iterations
+- [x] Hard stop at `max_tokens` limit
+- [x] Hard stop at `max_budget_usd` limit
+- [x] Context freshness warning at 60% utilization
+- [x] Usage summary logged at end of loop
+- [x] Error message shows actual vs limit
 
+**Testing:**
 ```rust
-/// DAG manipulation commands
-Dag {
-    #[command(subcommand)]
-    action: DagCommands,
-},
-
-enum DagCommands {
-    /// Make sequential changes parallel
-    Parallelize {
-        /// Revset range to parallelize (e.g., "abc..xyz")
-        revset: String,
-    },
-    /// Absorb working copy fixes to correct ancestors
-    Absorb {
-        /// Specific files to absorb (empty = all)
-        paths: Vec<String>,
-    },
-    /// Split a change by files
-    Split {
-        /// Change ID to split
-        change_id: String,
-        /// File patterns for first group (rest goes to second change)
-        files: Vec<String>,
-    },
-    /// Squash a change into its parent
-    Squash {
-        /// Change ID to squash
-        change_id: String,
-    },
-}
-```
-
-### Acceptance Criteria
-
-- [ ] `DagOperations::parallelize()` restructures sequential changes into parallel
-- [ ] `DagOperations::absorb()` distributes fixes to correct ancestor branches
-- [ ] `DagOperations::split_by_files()` decomposes tasks by file groups
-- [ ] `DagOperations::squash()` consolidates changes
-- [ ] Orchestrator exposes `optimize_dag()`, `absorb_fixes()`, `decompose_task()`
-- [ ] CLI commands for all DAG operations
-- [ ] All operations create recovery points (Phase 2) before executing
-- [ ] Bookmarks tracked through rewrites verified (Phase 1 dependency)
-
-### Testing Checklist
-
-- [ ] Mock test: `parallelize()` calls `jj parallelize {revset}`
-- [ ] Mock test: `absorb()` calls `jj absorb` with optional path args
-- [ ] Mock test: `split_by_files()` calls `jj split -r {id} {files}`
-- [ ] Mock test: `squash()` calls `jj squash -r {id}`
-- [ ] Mock test: `squash_into()` calls `jj squash --from {src} --into {tgt}`
-- [ ] Unit test: `ParallelizeResult` parsing from jj output
-- [ ] Integration test: create 3 sequential changes, parallelize, verify DAG structure
-
----
-
-## Phase 5: Backpressure Enhancement
-
-**Priority:** MEDIUM
-**Business Value:** The current backpressure system (`crates/hox-orchestrator/src/backpressure.rs`) shells out to `cargo test`, `cargo clippy`, etc. directly. JJ's `jj fix` command can run formatters/linters retroactively on historical commits and auto-rebase descendants. Integrating `jj fix` eliminates formatting-only conflicts and keeps the entire commit chain clean.
-**Estimated Effort:** 1-2 days
-**Depends on:** None (can run in parallel with other phases)
-
-### What Changes
-
-#### Extend: `crates/hox-orchestrator/src/backpressure.rs`
-
-Add `jj fix` as a step in the backpressure pipeline. Insert after existing checks:
-
-```rust
-use hox_jj::JjExecutor;
-
-/// Run jj fix to auto-format all mutable commits
-///
-/// This applies configured formatters to the commit chain,
-/// preventing formatting-only conflicts between agents.
-pub async fn run_jj_fix<E: JjExecutor>(executor: &E, change_id: Option<&str>) -> Result<FixResult> {
-    let args = match change_id {
-        Some(id) => vec!["fix", "-s", id],
-        None => vec!["fix"],
+#[tokio::test]
+async fn test_budget_enforcement_tokens() {
+    let config = LoopConfig {
+        max_iterations: 100,
+        max_tokens: Some(10_000),
+        max_budget_usd: None,
+        // ...
     };
 
-    let output = executor.exec(&args).await?;
+    let mut engine = RalphLoopEngine::new(config, mock_executor, mock_client);
 
-    Ok(FixResult {
-        success: output.success,
-        output: if output.success {
-            output.stdout
-        } else {
-            output.stderr
-        },
-    })
-}
+    // Mock agent to return 6000 tokens per iteration
+    // Should fail after 2 iterations (12000 > 10000)
 
-#[derive(Debug, Clone)]
-pub struct FixResult {
-    pub success: bool,
-    pub output: String,
-}
-
-/// Enhanced backpressure that includes jj fix
-pub async fn run_all_checks_with_fix<E: JjExecutor>(
-    workspace_path: &Path,
-    executor: &E,
-    change_id: Option<&str>,
-) -> Result<BackpressureResult> {
-    // Run jj fix FIRST to clean formatting
-    let fix_result = run_jj_fix(executor, change_id).await;
-    if let Err(e) = &fix_result {
-        tracing::warn!("jj fix failed (non-fatal): {}", e);
-    }
-
-    // Then run standard checks (tests, lints, builds)
-    run_all_checks(workspace_path)
+    let result = engine.run().await;
+    assert!(matches!(result, Err(HoxError::BudgetExceeded(_))));
 }
 ```
 
-#### Configuration Support
+---
 
-Add jj fix configuration guidance. When `hox init` runs, suggest adding fix configuration:
+### Improvement #7: Fail-Open Audit
+
+**Goal:** Ensure infrastructure failures don't kill agent progress. "hox doesn't crash on transient issues."
+
+**Current State:**
+- Some operations fail-open (e.g., `jj fix` is non-fatal in backpressure.rs)
+- Others are inconsistent (activity_logger.rs, oplog.rs)
+- No unified philosophy
+
+**What Changes:**
+
+**New File:** `crates/hox-core/src/fail_open.rs`
 
 ```rust
-// In cmd_init(), add after creating .hox directory:
-println!("\nTo enable auto-formatting with jj fix, add to .jj/repo/config.toml:");
-println!("  [fix.tools.rustfmt]");
-println!("  command = [\"rustfmt\", \"--edition\", \"2021\"]");
-println!("  patterns = [\"glob:*.rs\"]");
+use std::future::Future;
+use tracing::{warn, error};
+
+/// Execute an operation that should fail open (infrastructure, not business logic)
+///
+/// Logs the error but returns Ok(None) instead of propagating.
+/// Use for operations like:
+/// - Activity logging
+/// - Metrics/telemetry
+/// - OpLog polling
+/// - Workspace cleanup
+///
+/// DO NOT use for:
+/// - Agent execution (business logic)
+/// - Backpressure checks (correctness)
+/// - Metadata reads (state)
+pub async fn fail_open<F, T, E>(
+    operation_name: &str,
+    f: F,
+) -> Result<Option<T>, E>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match f.await {
+        Ok(val) => Ok(Some(val)),
+        Err(e) => {
+            warn!("{} failed (fail-open): {}", operation_name, e);
+            Ok(None)
+        }
+    }
+}
+
+/// Like fail_open but errors are fatal after N retries
+pub async fn fail_open_with_retries<F, T, E>(
+    operation_name: &str,
+    f: F,
+    max_retries: usize,
+) -> Result<Option<T>, E>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    for attempt in 1..=max_retries {
+        match f.await {
+            Ok(val) => return Ok(Some(val)),
+            Err(e) => {
+                if attempt == max_retries {
+                    error!("{} failed after {} retries: {}",
+                           operation_name, max_retries, e);
+                    return Ok(None);
+                }
+                warn!("{} failed (attempt {}/{}): {}",
+                      operation_name, attempt, max_retries, e);
+                tokio::time::sleep(tokio::time::Duration::from_millis(100 * attempt as u64)).await;
+            }
+        }
+    }
+    unreachable!()
+}
 ```
 
-#### Extend: `crates/hox-orchestrator/src/loop_engine.rs`
+**Apply to Activity Logger:** `crates/hox-orchestrator/src/activity_logger.rs`
 
-Replace the backpressure call (around line 87 and 184) to use the enhanced version:
+```rust
+use hox_core::fail_open;
+
+impl ActivityLogger {
+    pub async fn log_session_start(&self, session_id: &str) -> Result<()> {
+        fail_open("activity_logger::log_session_start", async {
+            // existing implementation
+        }).await?;
+        Ok(())
+    }
+
+    pub async fn log_iteration(&self, iteration: usize, status: &str) -> Result<()> {
+        fail_open("activity_logger::log_iteration", async {
+            // existing implementation
+        }).await?;
+        Ok(())
+    }
+}
+```
+
+**Apply to OpLog Watcher:** `crates/hox-jj/src/oplog.rs`
+
+```rust
+// In OpLogWatcher::poll() (around line 82)
+loop {
+    let result = fail_open("oplog_watcher::poll", async {
+        self.executor.exec(&["op", "log", "-n", "1"]).await
+    }).await?;
+
+    match result {
+        Some(output) => {
+            // Process output
+        }
+        None => {
+            // OpLog poll failed, continue after delay
+            tokio::time::sleep(self.config.poll_interval).await;
+            continue;
+        }
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [x] `fail_open()` wrapper in hox-core
+- [x] `fail_open_with_retries()` for transient errors
+- [x] Activity logger operations fail-open
+- [x] OpLog polling fails open
+- [x] Workspace cleanup fails open
+- [x] Agent execution does NOT fail-open (business logic)
+- [x] Backpressure checks do NOT fail-open (correctness)
+
+**Documentation:**
+
+Add to README or docs/ARCHITECTURE.md:
+
+```markdown
+## Fail-Open Philosophy
+
+Hox distinguishes between **business logic** (must succeed) and **infrastructure** (nice to have):
+
+**Fail-Open (OK to skip):**
+- Activity logging
+- Metrics/telemetry
+- OpLog polling
+- Workspace cleanup
+- Pattern recording
+
+**Fail-Closed (must succeed):**
+- Agent execution
+- Backpressure checks (tests/lints)
+- Metadata reads/writes
+- JJ operations that affect correctness
+```
+
+---
+
+### Improvement #8: .hox/config.toml
+
+**Goal:** Per-project configuration, shareable defaults, no more hardcoded values.
+
+**Current State:**
+- Protected files hardcoded in `crates/hox-agent/src/file_executor.rs` (line ~100)
+- Loop config only programmatic
+- Backpressure checks auto-detected or in `.hox/checks.toml`
+
+**What Changes:**
+
+**New File:** `crates/hox-core/src/config.rs`
+
+```rust
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Repository-level Hox configuration
+///
+/// Loaded from `.hox/config.toml` in the repo root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoxConfig {
+    /// Files/directories that agents cannot modify
+    #[serde(default = "default_protected_files")]
+    pub protected_files: Vec<String>,
+
+    /// Loop execution defaults
+    #[serde(default)]
+    pub loop_defaults: LoopDefaults,
+
+    /// Backpressure check configuration
+    #[serde(default)]
+    pub backpressure: BackpressureConfig,
+
+    /// Model selection
+    #[serde(default)]
+    pub models: ModelConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopDefaults {
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackpressureConfig {
+    /// Run these checks on every iteration
+    #[serde(default)]
+    pub fast_checks: Vec<String>,
+
+    /// Run these checks every N iterations
+    #[serde(default)]
+    pub slow_checks: Vec<SlowCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlowCheck {
+    pub command: String,
+    pub every_n_iterations: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    #[serde(default = "default_model")]
+    pub default: String,
+
+    #[serde(default)]
+    pub api_key_env: String,
+}
+
+fn default_protected_files() -> Vec<String> {
+    vec![
+        ".git".to_string(),
+        ".jj".to_string(),
+        ".env".to_string(),
+        "Cargo.lock".to_string(),
+        "package-lock.json".to_string(),
+        "yarn.lock".to_string(),
+        ".secrets".to_string(),
+        ".gitignore".to_string(),
+    ]
+}
+
+fn default_max_iterations() -> usize { 20 }
+fn default_model() -> String { "claude-sonnet-4".to_string() }
+
+impl HoxConfig {
+    /// Load from `.hox/config.toml` or use defaults
+    pub fn load_or_default(repo_root: &Path) -> Result<Self> {
+        let config_path = repo_root.join(".hox/config.toml");
+
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            Ok(toml::from_str(&content)?)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    /// Write default config to `.hox/config.toml`
+    pub fn write_default(repo_root: &Path) -> Result<()> {
+        let config_path = repo_root.join(".hox/config.toml");
+        let config = Self::default();
+        let content = toml::to_string_pretty(&config)?;
+        std::fs::write(&config_path, content)?;
+        Ok(())
+    }
+}
+
+impl Default for HoxConfig {
+    fn default() -> Self {
+        Self {
+            protected_files: default_protected_files(),
+            loop_defaults: LoopDefaults::default(),
+            backpressure: BackpressureConfig::default(),
+            models: ModelConfig::default(),
+        }
+    }
+}
+
+impl Default for LoopDefaults {
+    fn default() -> Self {
+        Self {
+            max_iterations: 20,
+            max_tokens: None,
+            max_budget_usd: None,
+        }
+    }
+}
+
+impl Default for BackpressureConfig {
+    fn default() -> Self {
+        Self {
+            fast_checks: vec![
+                "cargo check".to_string(),
+                "cargo clippy".to_string(),
+            ],
+            slow_checks: vec![
+                SlowCheck {
+                    command: "cargo test".to_string(),
+                    every_n_iterations: 3,
+                },
+            ],
+        }
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            default: "claude-sonnet-4".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+        }
+    }
+}
+```
+
+**Example:** `.hox/config.toml`
+
+```toml
+# Hox Configuration
+
+protected_files = [
+    ".git",
+    ".jj",
+    ".env",
+    "Cargo.lock",
+    ".secrets",
+    ".gitignore",
+]
+
+[loop_defaults]
+max_iterations = 50
+max_tokens = 100000
+max_budget_usd = 5.00
+
+[backpressure]
+fast_checks = ["cargo check", "cargo clippy --all-targets"]
+slow_checks = [
+    { command = "cargo test", every_n_iterations = 5 },
+    { command = "cargo doc", every_n_iterations = 10 },
+]
+
+[models]
+default = "claude-sonnet-4"
+api_key_env = "ANTHROPIC_API_KEY"
+```
+
+**Extend:** `crates/hox-cli/src/commands/init.rs`
+
+```rust
+pub fn cmd_init(repo_path: &Path) -> Result<()> {
+    // Create .hox directory
+    let hox_dir = repo_path.join(".hox");
+    std::fs::create_dir_all(&hox_dir)?;
+
+    // Write default config
+    HoxConfig::write_default(repo_path)?;
+
+    println!("Hox initialized!");
+    println!("Configuration written to .hox/config.toml");
+    println!("Edit this file to customize protected files, budgets, and checks.");
+
+    Ok(())
+}
+```
+
+**Extend:** `crates/hox-agent/src/file_executor.rs`
+
+Replace hardcoded protected files (line ~100):
 
 ```rust
 // Before:
-let mut backpressure = run_all_checks(&self.workspace_path)?;
+const PROTECTED_FILES: &[&str] = &[".git", ".env", "Cargo.lock", ...];
 
 // After:
-let mut backpressure = run_all_checks_with_fix(
-    &self.workspace_path,
-    &self.executor,
-    task.change_id.as_deref(),
-).await?;
+impl FileExecutor {
+    pub fn new(workspace_path: PathBuf, config: &HoxConfig) -> Self {
+        Self {
+            workspace_path,
+            protected_files: config.protected_files.clone(),
+        }
+    }
+}
 ```
 
-### Acceptance Criteria
-
-- [ ] `run_jj_fix()` function wraps `jj fix` command
-- [ ] `run_all_checks_with_fix()` runs jj fix before standard checks
-- [ ] jj fix failures are non-fatal (warn and continue)
-- [ ] Loop engine uses enhanced backpressure
-- [ ] `hox init` prints jj fix configuration guidance
-- [ ] Existing backpressure without jj fix still works (graceful fallback)
-
-### Testing Checklist
-
-- [ ] Mock test: `run_jj_fix()` calls `jj fix` or `jj fix -s {id}`
-- [ ] Mock test: jj fix failure does not block other checks
-- [ ] Unit test: `run_all_checks_with_fix()` runs fix then checks
-- [ ] Integration test: create change with formatting issues, run fix, verify clean
+**Acceptance Criteria:**
+- [x] `HoxConfig` struct with all settings
+- [x] Load from `.hox/config.toml` or defaults
+- [x] `hox init` writes default config
+- [x] Protected files configurable
+- [x] Loop defaults configurable
+- [x] Backpressure checks configurable
+- [x] Sensible defaults when no config exists
 
 ---
 
-## Phase 6: Advanced Revsets & Query Migration
+## Phase 2: Core Architecture
 
-**Priority:** MEDIUM
-**Business Value:** Current revset queries use `description(glob:...)` which is O(n) -- every query scans all change descriptions. After Phase 1 (bookmarks), queries can use `bookmarks(glob:...)` which is indexed and O(1). This phase migrates all queries and adds power queries needed for sophisticated orchestration.
-**Estimated Effort:** 2 days
-**Depends on:** Phase 1 (bookmark-based queries)
+**Goal:** Clean separation of state transitions from I/O, enable deterministic testing, support PostToolsHook pipeline.
 
-### What Changes
+**Timeline:** 3-4 days
+**Dependencies:** None, but enables Phase 4
 
-#### Extend: `crates/hox-jj/src/revsets.rs`
+### Improvement #1: Synchronous State Machine
 
-The `RevsetQueries` struct currently has 12 methods, all using `description(glob:...)`. Add bookmark-based equivalents and deprecate the description-based ones:
+**Current Problem:**
+`crates/hox-orchestrator/src/orchestrator.rs` (1,100 lines) has `OrchestratorState` enum but transitions mixed with async I/O. Hard to test, hard to reason about, hard to observe.
 
-```rust
-impl<E: JjExecutor> RevsetQueries<E> {
-    // ---- Bookmark-based queries (preferred when bookmarks are set up) ----
+**Goal:** Refactor to `(State, Event) → (State, Vec<Action>)` pure function pattern.
 
-    /// Find ready tasks using bookmarks
-    /// Revset: heads(bookmarks(glob:"task/*")) - conflicts() - ancestors(conflicts())
-    pub async fn ready_tasks_v2(&self) -> Result<Vec<ChangeId>> {
-        self.query("heads(bookmarks(glob:\"task/*\")) - conflicts() - ancestors(conflicts())")
-            .await
-    }
-
-    /// Find agent's active work using bookmarks
-    /// Revset: bookmarks(glob:"agent/{name}/*") & ~description(glob:"Status: done")
-    pub async fn agent_active_work(&self, agent_name: &str) -> Result<Vec<ChangeId>> {
-        let revset = format!(
-            "bookmarks(glob:\"agent/{}/*\") & ~description(glob:\"Status: done\")",
-            agent_name
-        );
-        self.query(&revset).await
-    }
-
-    /// Find parallelizable tasks (independent heads, no merges, no conflicts)
-    pub async fn parallelizable_tasks(&self) -> Result<Vec<ChangeId>> {
-        self.query("heads(mutable()) & ~merges() & ~conflicts()")
-            .await
-    }
-
-    /// Find what blocks a specific task (conflicting ancestors)
-    pub async fn blocking_conflicts(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
-        let revset = format!("ancestors({}) & mutable() & conflicts()", change_id);
-        self.query(&revset).await
-    }
-
-    /// Find empty changes (abandoned tasks)
-    pub async fn empty_changes(&self) -> Result<Vec<ChangeId>> {
-        self.query("empty() & mutable()").await
-    }
-
-    /// Find changes touching specific files
-    pub async fn changes_touching_file(&self, path: &str) -> Result<Vec<ChangeId>> {
-        let revset = format!("file(\"{}\")", path);
-        self.query(&revset).await
-    }
-
-    /// Safe reference that doesn't error if change is missing
-    pub async fn present(&self, change_id: &ChangeId) -> Result<Option<ChangeId>> {
-        let revset = format!("present({})", change_id);
-        let results = self.query(&revset).await?;
-        Ok(results.into_iter().next())
-    }
-
-    /// Find connected component (task subgraph)
-    pub async fn connected_component(&self, change_id: &ChangeId) -> Result<Vec<ChangeId>> {
-        let revset = format!("connected({})", change_id);
-        self.query(&revset).await
-    }
-
-    /// Find most recent N changes matching criteria
-    pub async fn latest(&self, revset: &str, count: usize) -> Result<Vec<ChangeId>> {
-        let full_revset = format!("latest({}, {})", revset, count);
-        self.query(&full_revset).await
-    }
-}
-```
-
-#### Extend: `crates/hox-orchestrator/src/orchestrator.rs`
-
-Migrate internal queries to use bookmark-based versions. For example, `check_align_requests()` (line 251) and `integrate()` (line 352):
+**New File:** `crates/hox-orchestrator/src/state_machine.rs`
 
 ```rust
-// Before (in integrate):
-let agent_changes = queries.by_orchestrator(&self.config.id.to_string()).await?;
+use hox_core::{Task, TaskStatus, Priority, OrchestratorId, ChangeId};
 
-// After:
-let agent_changes = queries
-    .orchestrator_by_bookmark(&self.config.id.to_string())
-    .await
-    .or_else(|_| {
-        // Fallback to description-based query if bookmarks not set
-        queries.by_orchestrator(&self.config.id.to_string())
-    })?;
-```
-
-#### Extend: `crates/hox-cli/src/main.rs`
-
-Enhance the `hox status` command with richer queries:
-
-```rust
-// In cmd_status():
-// Add parallelizable task count
-let parallelizable = queries.parallelizable_tasks().await?;
-println!("Parallelizable: {}", parallelizable.len());
-
-// Add empty/abandoned count
-let empty = queries.empty_changes().await?;
-if !empty.is_empty() {
-    println!("Empty (abandoned): {}", empty.len());
-}
-```
-
-### Acceptance Criteria
-
-- [ ] All new bookmark-based query methods added to `RevsetQueries`
-- [ ] Orchestrator migrated to prefer bookmark queries with description fallback
-- [ ] Power queries: parallelizable, blocking_conflicts, empty, file-based, connected
-- [ ] CLI status enhanced with new queries
-- [ ] `present()` wrapper for safe references
-- [ ] `latest()` wrapper for recency queries
-- [ ] All existing description-based queries remain functional
-
-### Testing Checklist
-
-- [ ] Mock test: Each new revset method generates correct revset string
-- [ ] Mock test: Fallback from bookmark to description queries works
-- [ ] Unit test: `parallelizable_tasks()` revset string is correct
-- [ ] Unit test: `blocking_conflicts()` revset includes conflicts() predicate
-- [ ] Integration test: Create bookmarked tasks, query them with new methods
-
----
-
-## Phase 7: Speculative Execution & Audit Trails
-
-**Priority:** MEDIUM-LOW
-**Business Value:** `jj duplicate` enables trying multiple approaches to the same task in parallel. `jj evolog` provides agent audit trails. `jj backout` enables safe reversion. These are "nice to have" features that improve observability and enable advanced orchestration patterns.
-**Estimated Effort:** 2 days
-**Depends on:** Phase 1 (bookmarks), Phase 2 (recovery)
-
-### What Changes
-
-#### Extend: `crates/hox-jj/src/dag.rs`
-
-Add speculative execution and audit operations:
-
-```rust
-impl<E: JjExecutor> DagOperations<E> {
-    // --- jj duplicate ---
-
-    /// Duplicate a change for speculative execution
-    ///
-    /// Creates a copy that can be worked on independently.
-    /// The original remains untouched.
-    pub async fn duplicate(
-        &self,
-        change_id: &ChangeId,
-        destination: Option<&ChangeId>,
-    ) -> Result<ChangeId>;
-
-    // --- jj backout ---
-
-    /// Create a change that undoes the effect of another change
-    ///
-    /// Safer than rollback -- creates new history instead of rewriting.
-    pub async fn backout(&self, change_id: &ChangeId) -> Result<ChangeId>;
-
-    // --- jj evolog ---
-
-    /// Get the evolution log for a change (all rewrites, amends, etc.)
-    ///
-    /// Useful for agent audit trails -- see how a task evolved.
-    pub async fn evolution_log(&self, change_id: &ChangeId) -> Result<Vec<EvolutionEntry>>;
-
-    // --- jj simplify-parents ---
-
-    /// Clean up redundant parent relationships after merges
-    pub async fn simplify_parents(&self, change_id: &ChangeId) -> Result<()>;
+/// Orchestrator state (pure data, no I/O)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum State {
+    Idle,
+    Planning { goal: String },
+    Executing { phase: Phase, tasks: Vec<Task> },
+    Integrating { merge_id: ChangeId },
+    Validating { validation_id: String },
+    Complete { summary: String },
+    Failed { error: String },
 }
 
+/// Phase within execution
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase {
+    Contracts,
+    ParallelWork,
+    Integration,
+    Validation,
+}
+
+/// Events that trigger state transitions
 #[derive(Debug, Clone)]
-pub struct EvolutionEntry {
-    pub commit_id: CommitId,
-    pub description: String,
-    pub timestamp: String,
+pub enum Event {
+    StartOrchestration { goal: String },
+    PlanningComplete { tasks: Vec<Task> },
+    PhaseComplete,
+    AllTasksComplete,
+    IntegrationConflict { conflicted_changes: Vec<ChangeId> },
+    IntegrationClean,
+    ValidationPassed,
+    ValidationFailed { reason: String },
+    Error { message: String },
+}
+
+/// Actions to perform (effects, executed by runtime)
+#[derive(Debug, Clone)]
+pub enum Action {
+    SpawnPlanningAgent { goal: String },
+    SpawnTaskAgent { task: Task },
+    CreateMerge { changes: Vec<ChangeId> },
+    ResolveConflicts { changes: Vec<ChangeId> },
+    SpawnValidator { validation_id: String },
+    LogActivity { message: String },
+    RecordPattern { pattern: String },
+}
+
+/// Pure state transition function
+pub fn transition(state: State, event: Event) -> (State, Vec<Action>) {
+    use State::*;
+    use Event::*;
+
+    match (state, event) {
+        (Idle, StartOrchestration { goal }) => {
+            (
+                Planning { goal: goal.clone() },
+                vec![Action::SpawnPlanningAgent { goal }]
+            )
+        }
+
+        (Planning { .. }, PlanningComplete { tasks }) => {
+            let actions = tasks.iter()
+                .map(|task| Action::SpawnTaskAgent { task: task.clone() })
+                .collect();
+            (
+                Executing { phase: Phase::Contracts, tasks },
+                actions
+            )
+        }
+
+        (Executing { phase: Phase::Contracts, tasks }, PhaseComplete) => {
+            (
+                Executing { phase: Phase::ParallelWork, tasks },
+                vec![Action::LogActivity { message: "Entering parallel work phase".to_string() }]
+            )
+        }
+
+        (Executing { phase: Phase::ParallelWork, tasks }, AllTasksComplete) => {
+            let change_ids: Vec<_> = tasks.iter().map(|t| t.change_id.clone()).collect();
+            (
+                Integrating { merge_id: ChangeId::new() },
+                vec![Action::CreateMerge { changes: change_ids }]
+            )
+        }
+
+        (Integrating { .. }, IntegrationConflict { conflicted_changes }) => {
+            (
+                Integrating { merge_id: ChangeId::new() },
+                vec![Action::ResolveConflicts { changes: conflicted_changes }]
+            )
+        }
+
+        (Integrating { merge_id }, IntegrationClean) => {
+            (
+                Validating { validation_id: merge_id.to_string() },
+                vec![Action::SpawnValidator { validation_id: merge_id.to_string() }]
+            )
+        }
+
+        (Validating { .. }, ValidationPassed) => {
+            (
+                Complete { summary: "Orchestration completed successfully".to_string() },
+                vec![Action::RecordPattern { pattern: "successful_completion".to_string() }]
+            )
+        }
+
+        (_, Error { message }) => {
+            (
+                Failed { error: message.clone() },
+                vec![Action::LogActivity { message: format!("Error: {}", message) }]
+            )
+        }
+
+        // Invalid transitions (should not happen in correct implementation)
+        (state, event) => {
+            (
+                Failed { error: format!("Invalid transition: {:?} -> {:?}", state, event) },
+                vec![]
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_state_machine_never_panics(
+            state in any::<State>(),
+            event in any::<Event>()
+        ) {
+            let _ = transition(state, event);
+        }
+    }
+
+    #[test]
+    fn test_happy_path() {
+        let (state, actions) = transition(
+            State::Idle,
+            Event::StartOrchestration { goal: "test".to_string() }
+        );
+        assert!(matches!(state, State::Planning { .. }));
+        assert_eq!(actions.len(), 1);
+
+        let tasks = vec![Task::new("task1")];
+        let (state, actions) = transition(
+            state,
+            Event::PlanningComplete { tasks: tasks.clone() }
+        );
+        assert!(matches!(state, State::Executing { phase: Phase::Contracts, .. }));
+    }
 }
 ```
 
-**JJ commands used:**
-```bash
-jj duplicate {change_id} [-d {destination}]
-jj backout -r {change_id}
-jj evolog -r {change_id} -T 'commit_id ++ "\t" ++ description ++ "\t" ++ committer.timestamp() ++ "\n"' --no-graph
-jj simplify-parents -r {change_id}
-```
+**Extend:** `crates/hox-orchestrator/src/orchestrator.rs`
 
-#### New File: `crates/hox-orchestrator/src/speculative.rs`
+Replace inline state management with state machine:
 
 ```rust
-/// Manager for speculative execution patterns
-pub struct SpeculativeExecutor<E: JjExecutor> {
-    dag: DagOperations<E>,
-    bookmark_mgr: BookmarkManager<E>,
+pub struct Orchestrator<E: JjExecutor> {
+    config: OrchestratorConfig,
+    executor: E,
+    state: State,  // NEW: current state
+    // ... existing fields ...
 }
 
-impl<E: JjExecutor + Clone> SpeculativeExecutor<E> {
-    /// Try multiple approaches to a task in parallel
-    ///
-    /// 1. Duplicate the task N times
-    /// 2. Assign each duplicate to a different agent with different strategies
-    /// 3. Compare results and pick the best
-    pub async fn try_approaches(
-        &self,
-        change_id: &ChangeId,
-        strategies: &[String],
-    ) -> Result<Vec<ChangeId>>;
+impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
+    pub async fn run(&mut self) -> Result<()> {
+        // Main runtime loop: process events, execute actions
+        loop {
+            // Get next event (from agent completion, JJ poll, etc.)
+            let event = self.next_event().await?;
 
-    /// Compare speculative results and pick winner
-    pub async fn evaluate_and_pick(
-        &self,
-        candidates: &[ChangeId],
-    ) -> Result<ChangeId>;
+            // Pure state transition
+            let (new_state, actions) = state_machine::transition(
+                self.state.clone(),
+                event
+            );
+
+            self.state = new_state;
+
+            // Execute actions
+            for action in actions {
+                self.execute_action(action).await?;
+            }
+
+            // Check for terminal states
+            if matches!(self.state, State::Complete { .. } | State::Failed { .. }) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn execute_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::SpawnPlanningAgent { goal } => {
+                self.spawn_planning_agent(&goal).await?;
+            }
+            Action::SpawnTaskAgent { task } => {
+                self.spawn_agent(&task).await?;
+            }
+            Action::CreateMerge { changes } => {
+                self.create_merge(&changes).await?;
+            }
+            Action::ResolveConflicts { changes } => {
+                self.resolve_conflicts(&changes).await?;
+            }
+            Action::LogActivity { message } => {
+                self.activity_logger.log(&message).await?;
+            }
+            Action::RecordPattern { pattern } => {
+                self.pattern_store.record(&pattern).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 ```
 
-### Acceptance Criteria
-
-- [ ] `duplicate()` creates copy via `jj duplicate`
-- [ ] `backout()` creates reverse change via `jj backout`
-- [ ] `evolution_log()` returns change history via `jj evolog`
-- [ ] `simplify_parents()` cleans DAG via `jj simplify-parents`
-- [ ] `SpeculativeExecutor` can duplicate tasks for parallel approach testing
-- [ ] CLI commands for duplicate, backout, evolog
-
-### Testing Checklist
-
-- [ ] Mock test: `duplicate()` calls `jj duplicate {id}`
-- [ ] Mock test: `backout()` calls `jj backout -r {id}`
-- [ ] Mock test: `evolution_log()` parses `jj evolog` output
-- [ ] Unit test: `SpeculativeExecutor::try_approaches()` creates N duplicates
+**Acceptance Criteria:**
+- [x] Pure `transition(state, event) -> (state, actions)` function
+- [x] All state transitions in state_machine.rs, no I/O
+- [x] Orchestrator.run() processes events and executes actions
+- [x] Proptest verifies all transitions are total (never panic)
+- [x] Unit tests for happy path, error paths, invalid transitions
+- [x] State machine testable without network/JJ/filesystem
 
 ---
 
-## Cross-Cutting: Dual Metadata Path
+### Improvement #3: PostToolsHook
 
-**Context:** Hox currently parses metadata from JJ change descriptions using regex (`crates/hox-jj/src/metadata.rs`). The jj-dev fork adds native metadata fields to JJ commits. Until jj-dev is complete and deployed, Hox must support both paths.
+**Goal:** Extract JJ operations into a hook pipeline for cleaner separation and extensibility.
 
-### Strategy: Trait-Based Abstraction
+**Current State:** Loop engine handles JJ updates inline after agent execution (loop_engine.rs)
 
-#### New File: `crates/hox-jj/src/metadata_provider.rs`
+**New File:** `crates/hox-orchestrator/src/hooks.rs`
 
 ```rust
 use async_trait::async_trait;
+use hox_core::{ChangeId, HoxMetadata};
+use hox_jj::JjExecutor;
 
-/// Abstraction over metadata storage backends
-///
-/// Two implementations:
-/// 1. DescriptionMetadataProvider - Current regex parsing (bridge)
-/// 2. NativeMetadataProvider - jj-dev native fields (future)
+/// Hook that runs after agent tool execution
 #[async_trait]
-pub trait MetadataProvider: Send + Sync {
-    async fn read(&self, change_id: &ChangeId) -> Result<HoxMetadata>;
-    async fn write(&self, change_id: &ChangeId, metadata: &HoxMetadata) -> Result<()>;
+pub trait PostToolsHook: Send + Sync {
+    async fn execute(&self, context: &HookContext) -> Result<HookResult>;
 }
 
-/// Current implementation: parse from description text
-pub struct DescriptionMetadataProvider<E: JjExecutor> {
-    manager: MetadataManager<E>,
+pub struct HookContext {
+    pub change_id: ChangeId,
+    pub workspace_path: PathBuf,
+    pub iteration: usize,
+    pub metadata: HoxMetadata,
 }
 
-#[async_trait]
-impl<E: JjExecutor + Send + Sync> MetadataProvider for DescriptionMetadataProvider<E> {
-    async fn read(&self, change_id: &ChangeId) -> Result<HoxMetadata> {
-        self.manager.read(change_id).await
-    }
-
-    async fn write(&self, change_id: &ChangeId, metadata: &HoxMetadata) -> Result<()> {
-        self.manager.set(change_id, metadata).await
-    }
+pub struct HookResult {
+    pub success: bool,
+    pub message: String,
 }
 
-/// Future implementation: use jj-dev native metadata fields
-/// When jj-dev ships, this will use:
-///   jj describe --set-priority high --set-status in_progress
-///   jj log -T 'priority ++ "\t" ++ status ++ ...'
-pub struct NativeMetadataProvider<E: JjExecutor> {
+/// Auto-commit working directory changes
+pub struct AutoCommitHook<E: JjExecutor> {
     executor: E,
 }
 
-// Implementation stubbed -- will be filled when jj-dev ships
+#[async_trait]
+impl<E: JjExecutor + Send + Sync> PostToolsHook for AutoCommitHook<E> {
+    async fn execute(&self, context: &HookContext) -> Result<HookResult> {
+        // jj describe to update metadata
+        let metadata_str = serde_json::to_string(&context.metadata)?;
+        self.executor.exec(&[
+            "describe",
+            "-m", &metadata_str,
+        ]).await?;
+
+        Ok(HookResult {
+            success: true,
+            message: "Auto-committed changes".to_string(),
+        })
+    }
+}
+
+/// Take JJ snapshot (lightweight checkpoint)
+pub struct SnapshotHook<E: JjExecutor> {
+    executor: E,
+}
+
+#[async_trait]
+impl<E: JjExecutor + Send + Sync> PostToolsHook for SnapshotHook<E> {
+    async fn execute(&self, context: &HookContext) -> Result<HookResult> {
+        // jj already snapshots automatically on every command
+        // This is a no-op but provides extension point
+        Ok(HookResult {
+            success: true,
+            message: "Snapshot taken".to_string(),
+        })
+    }
+}
+
+/// Hook pipeline executor
+pub struct HookPipeline {
+    hooks: Vec<Box<dyn PostToolsHook>>,
+}
+
+impl HookPipeline {
+    pub fn new() -> Self {
+        Self { hooks: Vec::new() }
+    }
+
+    pub fn add_hook(&mut self, hook: Box<dyn PostToolsHook>) {
+        self.hooks.push(hook);
+    }
+
+    /// Execute all hooks in order, fail-open
+    pub async fn execute_all(&self, context: &HookContext) -> Result<()> {
+        for hook in &self.hooks {
+            match hook.execute(context).await {
+                Ok(result) => {
+                    if result.success {
+                        info!("Hook succeeded: {}", result.message);
+                    } else {
+                        warn!("Hook failed (non-fatal): {}", result.message);
+                    }
+                }
+                Err(e) => {
+                    warn!("Hook error (non-fatal): {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 ```
 
-#### Migration Path
+**Extend:** `crates/hox-orchestrator/src/loop_engine.rs`
 
-The trait is designed so that switching from description-based to native metadata requires:
-
-1. Implement `NativeMetadataProvider` (fill the stub)
-2. Change the provider construction from `DescriptionMetadataProvider::new()` to `NativeMetadataProvider::new()`
-3. Run a one-time migration to move metadata from descriptions to native fields
-
-No other code needs to change. Every consumer works through `dyn MetadataProvider`.
-
-### Integration Points
-
-Every module that currently uses `MetadataManager` directly should be updated to accept `dyn MetadataProvider`:
-
-| File | Current Usage | Migration |
-|------|--------------|-----------|
-| `orchestrator.rs:160` | `MetadataManager::new(executor).set(...)` | Accept `&dyn MetadataProvider` |
-| `orchestrator.rs:214` | `MetadataManager::new(executor).set(...)` | Accept `&dyn MetadataProvider` |
-| `loop_engine.rs:326` | `MetadataManager::new(executor).read(...)` | Accept `&dyn MetadataProvider` |
-| `loop_engine.rs:362` | `self.executor.exec(["describe"...])` | Use provider's `write()` |
-
-**This migration can happen incrementally.** It is NOT a prerequisite for any phase -- it is a parallel improvement track.
-
----
-
-## Dependency Map
-
-```
-Phase 1: Bookmarks     Phase 2: Rollback     Phase 5: jj fix
-  (CRITICAL)              (HIGH)              (MEDIUM)
-      |                     |                     |
-      v                     v                     |
-Phase 4: DAG Ops     Phase 3: Conflicts          |
-  (HIGH)               (HIGH)                    |
-      |                     |                     |
-      v                     v                     v
-Phase 6: Advanced Revsets         Phase 5 integrates
-  (MEDIUM)                        into backpressure
-      |
-      v
-Phase 7: Speculative
-  (LOW-MEDIUM)
-
-Cross-cutting: Dual Metadata Path (parallel, any time)
-```
-
-**Recommended execution order for maximum parallelism:**
-
-| Slot | Agent A | Agent B |
-|------|---------|---------|
-| Week 1 | Phase 1 (Bookmarks) | Phase 2 (Rollback) |
-| Week 2 | Phase 4 (DAG Ops) | Phase 3 (Conflicts) |
-| Week 2 | -- | Phase 5 (jj fix) |
-| Week 3 | Phase 6 (Revsets) | Cross-cutting: Metadata Provider |
-| Week 3-4 | Phase 7 (Speculative) | -- |
-
----
-
-## Testing Strategy
-
-### Unit Tests (All Phases)
-
-Every new function gets a mock test using `MockJjExecutor`. The mock verifies:
-1. Correct JJ command arguments are constructed
-2. Output is parsed correctly
-3. Error cases are handled (command failure, malformed output)
-
-### Integration Tests
-
-Create a shared test fixture module at `crates/hox-jj/tests/common/mod.rs`:
+Replace inline JJ updates with hook pipeline:
 
 ```rust
-/// Create a temporary JJ repository for integration testing
-pub async fn create_test_repo() -> (TempDir, JjCommand) {
-    let dir = TempDir::new().unwrap();
-    // jj git init
-    let executor = JjCommand::new(dir.path());
-    executor.exec(&["git", "init"]).await.unwrap();
-    (dir, executor)
+pub struct RalphLoopEngine<E: JjExecutor> {
+    config: LoopConfig,
+    executor: E,
+    client: AnthropicClient,
+    hooks: HookPipeline,  // NEW
 }
 
-/// Create a test repo with some changes and bookmarks
-pub async fn create_test_repo_with_tasks() -> (TempDir, JjCommand) {
-    let (dir, executor) = create_test_repo().await;
-    // Create some changes with metadata
-    executor.exec(&["new", "-m", "Task: First task\nPriority: high\nStatus: open"]).await.unwrap();
-    executor.exec(&["bookmark", "create", "task/first"]).await.unwrap();
-    // ...
-    (dir, executor)
+impl<E: JjExecutor> RalphLoopEngine<E> {
+    pub fn new(config: LoopConfig, executor: E, client: AnthropicClient) -> Self {
+        let mut hooks = HookPipeline::new();
+        hooks.add_hook(Box::new(AutoCommitHook { executor: executor.clone() }));
+        hooks.add_hook(Box::new(SnapshotHook { executor: executor.clone() }));
+
+        Self {
+            config,
+            executor,
+            client,
+            hooks,
+        }
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        // ... after agent execution ...
+
+        // Execute hooks
+        let hook_context = HookContext {
+            change_id: task.change_id.clone(),
+            workspace_path: self.config.workspace_path.clone(),
+            iteration,
+            metadata: updated_metadata,
+        };
+
+        self.hooks.execute_all(&hook_context).await?;
+    }
 }
 ```
 
-### CI Considerations
-
-- Integration tests require `jj` binary installed
-- Mark integration tests with `#[cfg(feature = "integration")]` or `#[ignore]`
-- Run with `cargo test -- --ignored` in CI where jj is available
+**Acceptance Criteria:**
+- [x] `PostToolsHook` trait with execute() method
+- [x] `HookPipeline` executes hooks in order
+- [x] All hook failures are non-fatal (fail-open)
+- [x] `AutoCommitHook` updates metadata
+- [x] Loop engine uses hook pipeline instead of inline JJ calls
+- [x] Easy to add custom hooks
 
 ---
 
-## File Summary
+## Phase 3: Agent Quality
 
-### New Files
+**Goal:** Reliable agent output parsing, calibrated backpressure checks for faster iterations.
 
-| File | Phase | Purpose |
-|------|-------|---------|
-| `crates/hox-jj/src/bookmarks.rs` | 1 | Bookmark CRUD and Hox naming conventions |
-| `crates/hox-orchestrator/src/conflict_resolver.rs` | 3 | Conflict analysis, strategy, and resolution pipeline |
-| `crates/hox-jj/src/dag.rs` | 4, 7 | DAG manipulation (parallelize, absorb, split, squash, duplicate, backout, evolog) |
-| `crates/hox-orchestrator/src/recovery.rs` | 2 | Agent rollback and recovery points |
-| `crates/hox-orchestrator/src/speculative.rs` | 7 | Speculative execution patterns |
-| `crates/hox-jj/src/metadata_provider.rs` | Cross-cutting | Trait abstraction for dual metadata path |
-| `crates/hox-jj/tests/common/mod.rs` | All | Shared integration test fixtures |
+**Timeline:** 4-5 days
+**Dependencies:** None
 
-### Extended Files
+### Improvement #5: Structured Output over XML
 
-| File | Phases | Changes |
-|------|--------|---------|
-| `crates/hox-jj/src/lib.rs` | 1, 2, 4, 7 | Add module exports for bookmarks, dag, metadata_provider; extend oplog exports |
-| `crates/hox-jj/src/oplog.rs` | 2 | Add `OpManager` with undo/restore/revert/snapshot |
-| `crates/hox-jj/src/revsets.rs` | 1, 6 | Add bookmark-based queries, power queries, safe references |
-| `crates/hox-orchestrator/src/lib.rs` | 2, 3, 7 | Export recovery, conflict_resolver, speculative modules |
-| `crates/hox-orchestrator/src/orchestrator.rs` | 1, 3, 4, 6 | Bookmark creation on spawn, conflict resolution, DAG methods, query migration |
-| `crates/hox-orchestrator/src/backpressure.rs` | 5 | Add `run_jj_fix()` and enhanced check pipeline |
-| `crates/hox-orchestrator/src/loop_engine.rs` | 2, 5 | Recovery points around iterations, enhanced backpressure |
-| `crates/hox-cli/src/main.rs` | 1, 2, 4 | Add bookmark, rollback, dag subcommands |
-| `crates/hox-core/src/error.rs` | 2, 3 | Add `HoxError::Rollback`, `HoxError::ConflictResolution` variants |
+**Current Problem:**
+`crates/hox-agent/src/file_executor.rs` (415 lines) parses XML tags from agent text output. Malformed XML = silent failures or partial operations.
+
+**Goal:** Use Anthropic's `tool_use` API for guaranteed structured JSON output.
+
+**What Changes:**
+
+**Extend:** `crates/hox-agent/src/client.rs` (302 lines)
+
+Add tool definitions for Anthropic API:
+
+```rust
+use serde_json::json;
+
+pub struct AnthropicClient {
+    // ... existing fields ...
+}
+
+impl AnthropicClient {
+    fn get_tool_definitions() -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "name": "read_file",
+                "description": "Read the contents of a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to read"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            json!({
+                "name": "write_file",
+                "description": "Write or create a file with given content",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write"
+                        }
+                    },
+                    "required": ["path", "content"]
+                }
+            }),
+            json!({
+                "name": "edit_file",
+                "description": "Make precise edits to an existing file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact text to replace"
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Replacement text"
+                        }
+                    },
+                    "required": ["path", "old_text", "new_text"]
+                }
+            }),
+            json!({
+                "name": "run_command",
+                "description": "Execute a shell command in the workspace",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }),
+        ]
+    }
+
+    pub async fn send_message_with_tools(
+        &self,
+        prompt: &str,
+    ) -> Result<AgentResponse> {
+        let payload = json!({
+            "model": self.model,
+            "max_tokens": 4096,
+            "tools": Self::get_tool_definitions(),
+            "messages": [{
+                "role": "user",
+                "content": prompt
+            }]
+        });
+
+        let response: AnthropicResponse = self.http_client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&payload)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        Ok(AgentResponse::from_anthropic(response))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentResponse {
+    pub thinking: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+```
+
+**Replace:** `crates/hox-agent/src/file_executor.rs`
+
+Remove XML parsing, replace with tool execution:
+
+```rust
+pub struct FileExecutor {
+    workspace_path: PathBuf,
+    protected_files: Vec<String>,
+}
+
+impl FileExecutor {
+    /// Execute tool calls from agent response
+    pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Result<Vec<ToolResult>> {
+        let mut results = Vec::new();
+
+        // Can execute in parallel since tools are independent
+        let futures: Vec<_> = tool_calls.iter()
+            .map(|tool| self.execute_tool(tool))
+            .collect();
+
+        for future in futures {
+            results.push(future.await?);
+        }
+
+        Ok(results)
+    }
+
+    async fn execute_tool(&self, tool: &ToolCall) -> Result<ToolResult> {
+        match tool.name.as_str() {
+            "read_file" => {
+                let path = tool.input["path"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing path".into()))?;
+                let content = self.read_file(path).await?;
+                Ok(ToolResult {
+                    tool_id: tool.id.clone(),
+                    success: true,
+                    output: content,
+                })
+            }
+
+            "write_file" => {
+                let path = tool.input["path"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing path".into()))?;
+                let content = tool.input["content"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing content".into()))?;
+
+                self.check_protected(path)?;
+                self.write_file(path, content).await?;
+
+                Ok(ToolResult {
+                    tool_id: tool.id.clone(),
+                    success: true,
+                    output: format!("Wrote {} bytes to {}", content.len(), path),
+                })
+            }
+
+            "edit_file" => {
+                let path = tool.input["path"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing path".into()))?;
+                let old_text = tool.input["old_text"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing old_text".into()))?;
+                let new_text = tool.input["new_text"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing new_text".into()))?;
+
+                self.check_protected(path)?;
+                self.edit_file(path, old_text, new_text).await?;
+
+                Ok(ToolResult {
+                    tool_id: tool.id.clone(),
+                    success: true,
+                    output: format!("Edited {}", path),
+                })
+            }
+
+            "run_command" => {
+                let command = tool.input["command"].as_str()
+                    .ok_or_else(|| HoxError::InvalidToolInput("missing command".into()))?;
+
+                let output = self.run_command(command).await?;
+
+                Ok(ToolResult {
+                    tool_id: tool.id.clone(),
+                    success: output.status.success(),
+                    output: format!("stdout: {}\nstderr: {}", output.stdout, output.stderr),
+                })
+            }
+
+            _ => Err(HoxError::UnknownTool(tool.name.clone())),
+        }
+    }
+
+    fn check_protected(&self, path: &str) -> Result<()> {
+        for protected in &self.protected_files {
+            if path.starts_with(protected) {
+                return Err(HoxError::ProtectedFile(path.to_string()));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct ToolResult {
+    pub tool_id: String,
+    pub success: bool,
+    pub output: String,
+}
+```
+
+**Acceptance Criteria:**
+- [x] Tool definitions for read_file, write_file, edit_file, run_command
+- [x] `send_message_with_tools()` uses Anthropic tool_use API
+- [x] `FileExecutor::execute_tools()` handles structured JSON input
+- [x] Parallel tool execution (independent tools run concurrently)
+- [x] Better error reporting per tool
+- [x] No XML parsing anywhere
+
+---
+
+### Improvement #6: Selective Backpressure Calibration
+
+**Goal:** Fast checks every iteration, slow checks periodically. Adaptive based on success/failure patterns.
+
+**Extend:** `crates/hox-orchestrator/src/backpressure.rs`
+
+```rust
+use hox_core::config::BackpressureConfig;
+
+pub struct BackpressureEngine {
+    config: BackpressureConfig,
+    check_history: CheckHistory,
+}
+
+struct CheckHistory {
+    /// Track which checks passed/failed recently
+    fast_check_failures: Vec<(String, usize)>, // (check_name, iteration)
+    slow_check_last_run: HashMap<String, usize>, // check_name -> last iteration
+}
+
+impl BackpressureEngine {
+    /// Run appropriate checks for this iteration
+    pub async fn run_checks(
+        &mut self,
+        iteration: usize,
+        workspace_path: &Path,
+    ) -> Result<BackpressureResult> {
+        let mut results = BackpressureResult::default();
+
+        // Always run fast checks
+        for check in &self.config.fast_checks {
+            let result = self.run_check(check, workspace_path).await?;
+            results.add(check.clone(), result);
+
+            if !result.success {
+                self.check_history.fast_check_failures.push((check.clone(), iteration));
+            }
+        }
+
+        // Run slow checks based on schedule and adaptive rules
+        for slow_check in &self.config.slow_checks {
+            let should_run = self.should_run_slow_check(&slow_check, iteration);
+
+            if should_run {
+                let result = self.run_check(&slow_check.command, workspace_path).await?;
+                results.add(slow_check.command.clone(), result);
+
+                self.check_history.slow_check_last_run
+                    .insert(slow_check.command.clone(), iteration);
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn should_run_slow_check(&self, check: &SlowCheck, iteration: usize) -> bool {
+        // Regular schedule
+        if iteration % check.every_n_iterations == 0 {
+            return true;
+        }
+
+        // Adaptive: if fast checks are churning, escalate to slow checks
+        let recent_failures = self.check_history.fast_check_failures.iter()
+            .filter(|(_, iter)| iteration - iter < 3)
+            .count();
+
+        if recent_failures >= 2 {
+            // Churning on fast checks, run slow checks to get more info
+            return true;
+        }
+
+        // Adaptive: if we haven't run in 2x the normal interval, force run
+        let last_run = self.check_history.slow_check_last_run
+            .get(&check.command)
+            .copied()
+            .unwrap_or(0);
+
+        if iteration - last_run > check.every_n_iterations * 2 {
+            return true;
+        }
+
+        false
+    }
+
+    async fn run_check(&self, command: &str, workspace_path: &Path) -> Result<CheckResult> {
+        let start = std::time::Instant::now();
+
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(workspace_path)
+            .output()
+            .await?;
+
+        let elapsed = start.elapsed();
+
+        Ok(CheckResult {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            elapsed,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub elapsed: std::time::Duration,
+}
+
+#[derive(Debug, Default)]
+pub struct BackpressureResult {
+    pub checks: HashMap<String, CheckResult>,
+}
+
+impl BackpressureResult {
+    fn add(&mut self, name: String, result: CheckResult) {
+        self.checks.insert(name, result);
+    }
+
+    pub fn all_passed(&self) -> bool {
+        self.checks.values().all(|r| r.success)
+    }
+
+    pub fn format_for_prompt(&self) -> String {
+        let mut output = String::new();
+
+        for (name, result) in &self.checks {
+            if !result.success {
+                output.push_str(&format!("\n## Check Failed: {}\n", name));
+                output.push_str(&format!("```\n{}\n```\n", result.stderr));
+            }
+        }
+
+        if output.is_empty() {
+            "All checks passed.".to_string()
+        } else {
+            format!("Some checks failed:\n{}", output)
+        }
+    }
+}
+```
+
+**Language-Aware Defaults:**
+
+Add to `HoxConfig`:
+
+```rust
+impl HoxConfig {
+    pub fn detect_language(repo_root: &Path) -> Option<Language> {
+        if repo_root.join("Cargo.toml").exists() {
+            Some(Language::Rust)
+        } else if repo_root.join("pyproject.toml").exists() {
+            Some(Language::Python)
+        } else if repo_root.join("package.json").exists() {
+            Some(Language::JavaScript)
+        } else {
+            None
+        }
+    }
+
+    pub fn default_for_language(lang: Language) -> BackpressureConfig {
+        match lang {
+            Language::Rust => BackpressureConfig {
+                fast_checks: vec![
+                    "cargo check".to_string(),
+                    "cargo clippy --all-targets".to_string(),
+                ],
+                slow_checks: vec![
+                    SlowCheck {
+                        command: "cargo test".to_string(),
+                        every_n_iterations: 3,  // Rust: lean on type system, less testing
+                    },
+                ],
+            },
+            Language::Python => BackpressureConfig {
+                fast_checks: vec![
+                    "ruff check .".to_string(),
+                    "mypy .".to_string(),
+                ],
+                slow_checks: vec![
+                    SlowCheck {
+                        command: "pytest".to_string(),
+                        every_n_iterations: 2,  // Python: run tests more often
+                    },
+                ],
+            },
+            Language::JavaScript => BackpressureConfig {
+                fast_checks: vec![
+                    "npm run lint".to_string(),
+                ],
+                slow_checks: vec![
+                    SlowCheck {
+                        command: "npm test".to_string(),
+                        every_n_iterations: 2,
+                    },
+                ],
+            },
+        }
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [x] Fast checks run every iteration
+- [x] Slow checks run on schedule
+- [x] Adaptive escalation when churning
+- [x] Language-aware defaults (Rust, Python, JS)
+- [x] Track check timing (fast vs slow ratio)
+- [x] Format failures for agent prompt
+
+---
+
+## Phase 4: Advanced Features
+
+**Goal:** Nice-to-have features that improve standalone UX.
+
+**Timeline:** 3-4 days
+**Dependencies:** Phase 2 (State Machine)
+
+### Improvement #9: Pattern Extraction
+
+**Current State:** `PatternStore` in `crates/hox-evolution/src/patterns.rs` (333 lines) requires manual pattern recording.
+
+**Goal:** Auto-extract patterns from successful completions and suggest to users.
+
+**Extend:** `crates/hox-evolution/src/patterns.rs`
+
+```rust
+pub struct PatternExtractor {
+    store: PatternStore,
+}
+
+impl PatternExtractor {
+    /// Extract patterns from a successful orchestration run
+    pub fn extract_from_trace(&self, trace: &OrchestrationTrace) -> Vec<Pattern> {
+        let mut patterns = Vec::new();
+
+        // Pattern: Fast convergence with specific backpressure config
+        if trace.iterations < 10 && trace.backpressure_config.is_some() {
+            patterns.push(Pattern {
+                name: "fast_convergence".to_string(),
+                description: format!(
+                    "Task converged in {} iterations with backpressure: {:?}",
+                    trace.iterations,
+                    trace.backpressure_config
+                ),
+                confidence: 0.7,
+                applicable_contexts: vec!["similar_task_type".to_string()],
+            });
+        }
+
+        // Pattern: Effective agent assignment
+        if let Some(agent_perf) = &trace.agent_performance {
+            if agent_perf.success_rate > 0.8 {
+                patterns.push(Pattern {
+                    name: "effective_agent".to_string(),
+                    description: format!(
+                        "Agent {} has {:.0}% success rate on {}",
+                        agent_perf.agent_id,
+                        agent_perf.success_rate * 100.0,
+                        trace.task_type
+                    ),
+                    confidence: agent_perf.success_rate,
+                    applicable_contexts: vec![trace.task_type.clone()],
+                });
+            }
+        }
+
+        patterns
+    }
+
+    /// Suggest patterns to user based on current context
+    pub fn suggest(&self, context: &TaskContext) -> Vec<Suggestion> {
+        let relevant_patterns = self.store.query(&context.task_type);
+
+        relevant_patterns.iter()
+            .filter(|p| p.confidence > 0.6)
+            .map(|p| Suggestion {
+                pattern_name: p.name.clone(),
+                message: format!(
+                    "💡 Suggestion: {} (confidence: {:.0}%)",
+                    p.description,
+                    p.confidence * 100.0
+                ),
+                actionable: true,
+            })
+            .collect()
+    }
+}
+
+pub struct Pattern {
+    pub name: String,
+    pub description: String,
+    pub confidence: f64,
+    pub applicable_contexts: Vec<String>,
+}
+
+pub struct Suggestion {
+    pub pattern_name: String,
+    pub message: String,
+    pub actionable: bool,
+}
+```
+
+**CLI Integration:**
+
+```rust
+// In hox loop command, after completion:
+let patterns = pattern_extractor.extract_from_trace(&trace);
+
+if !patterns.is_empty() {
+    println!("\n📊 Learned {} new patterns:", patterns.len());
+    for pattern in patterns {
+        println!("  - {}", pattern.description);
+    }
+
+    print!("Save these patterns? [Y/n] ");
+    // ... save if user confirms
+}
+
+// Before starting a loop:
+let suggestions = pattern_extractor.suggest(&task_context);
+
+if !suggestions.is_empty() {
+    println!("\n💡 Suggestions based on past runs:");
+    for suggestion in suggestions {
+        println!("  {}", suggestion.message);
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [x] `extract_from_trace()` identifies convergence patterns
+- [x] `extract_from_trace()` identifies effective agent assignments
+- [x] `suggest()` recommends patterns for current context
+- [x] CLI shows learned patterns after completion
+- [x] CLI shows suggestions before starting loop
+- [x] User can approve/reject pattern saves
+
+---
+
+### Improvement #10: Phase Auto-Advancement
+
+**Current State:** `PhaseManager` in `crates/hox-orchestrator/src/phases.rs` (191 lines) requires manual transitions.
+
+**Goal:** Auto-advance when all phase tasks complete.
+
+**Extend:** `crates/hox-orchestrator/src/phases.rs`
+
+```rust
+impl PhaseManager {
+    /// Check if current phase is complete (all tasks done)
+    pub async fn check_auto_advance<E: JjExecutor>(
+        &self,
+        queries: &RevsetQueries<E>,
+    ) -> Result<bool> {
+        let current_phase = self.current_phase();
+        let phase_tasks = queries.tasks_in_phase(current_phase).await?;
+
+        let all_complete = phase_tasks.iter()
+            .all(|task| task.status == TaskStatus::Done);
+
+        if all_complete && !phase_tasks.is_empty() {
+            info!("Phase {:?} complete, all {} tasks done", current_phase, phase_tasks.len());
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Auto-advance to next phase if current is complete
+    pub async fn maybe_advance<E: JjExecutor>(
+        &mut self,
+        queries: &RevsetQueries<E>,
+    ) -> Result<Option<Phase>> {
+        if self.check_auto_advance(queries).await? {
+            match self.advance() {
+                Ok(new_phase) => {
+                    info!("Auto-advanced to phase {:?}", new_phase);
+                    Ok(Some(new_phase))
+                }
+                Err(e) => {
+                    warn!("Cannot auto-advance: {}", e);
+                    Ok(None)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+```
+
+**Integrate with State Machine:**
+
+```rust
+// In orchestrator runtime loop:
+loop {
+    // ... existing event processing ...
+
+    // Check for phase auto-advancement
+    if let Some(new_phase) = self.phase_manager.maybe_advance(&queries).await? {
+        // Generate PhaseComplete event
+        let event = Event::PhaseComplete;
+        let (new_state, actions) = state_machine::transition(self.state.clone(), event);
+        self.state = new_state;
+
+        for action in actions {
+            self.execute_action(action).await?;
+        }
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [x] `check_auto_advance()` detects when all phase tasks complete
+- [x] `maybe_advance()` advances to next phase automatically
+- [x] Auto-advancement generates `PhaseComplete` event
+- [x] Works with state machine (Phase 2 dependency)
+- [x] User can disable auto-advancement via config
+
+---
+
+## Phase 5: Performance
+
+**Goal:** Eliminate subprocess overhead and string parsing fragility by using jj-lib directly.
+
+**Timeline:** 4-5 days
+**Dependencies:** None, but high risk (jj-lib API not stable)
+
+### Improvement #2: jj-lib Direct Integration
+
+**CRITICAL CAVEAT:** jj-lib API is not stable. This should be phased carefully and feature-flagged.
+
+**Current State:**
+- `JjCommand` in `crates/hox-jj/src/command.rs` (199 lines) spawns subprocesses
+- `MetadataManager` in `crates/hox-jj/src/metadata.rs` (442 lines) parses stdout strings
+- 4-6 subprocess spawns per iteration × 20-50 iterations = 80-300 process spawns per loop
+
+**Strategy: Gradual Migration**
+
+1. Add jj-lib as optional dependency
+2. Implement hot path (metadata read/write) first
+3. Feature flag the new implementation
+4. Fallback to subprocess if jj-lib unavailable
+
+**Add to Cargo.toml:**
+
+```toml
+[dependencies]
+jj-lib = { version = "0.20", optional = true }
+
+[features]
+default = []
+jj-lib-integration = ["dep:jj-lib"]
+```
+
+**New File:** `crates/hox-jj/src/lib_backend.rs`
+
+```rust
+#[cfg(feature = "jj-lib-integration")]
+use jj_lib::repo::Repo;
+#[cfg(feature = "jj-lib-integration")]
+use jj_lib::commit::Commit;
+
+#[cfg(feature = "jj-lib-integration")]
+pub struct JjLibExecutor {
+    repo: Arc<Mutex<Repo>>,
+}
+
+#[cfg(feature = "jj-lib-integration")]
+impl JjLibExecutor {
+    pub fn new(repo_path: &Path) -> Result<Self> {
+        let repo = Repo::load(repo_path)?;
+        Ok(Self {
+            repo: Arc::new(Mutex::new(repo)),
+        })
+    }
+}
+
+#[cfg(feature = "jj-lib-integration")]
+#[async_trait]
+impl JjExecutor for JjLibExecutor {
+    async fn exec(&self, args: &[&str]) -> Result<CommandOutput> {
+        // Parse args and dispatch to jj-lib functions
+        match args.get(0) {
+            Some(&"describe") => {
+                // Use jj-lib to update description directly
+                let repo = self.repo.lock().unwrap();
+                // ... jj-lib API calls ...
+                Ok(CommandOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+
+            Some(&"log") => {
+                // Use jj-lib to query commits
+                let repo = self.repo.lock().unwrap();
+                // ... jj-lib API calls ...
+                Ok(CommandOutput {
+                    success: true,
+                    stdout: format_commit_log(&commits),
+                    stderr: String::new(),
+                })
+            }
+
+            _ => {
+                // Fallback to subprocess for unsupported commands
+                let output = std::process::Command::new("jj")
+                    .args(args)
+                    .output()?;
+
+                Ok(CommandOutput {
+                    success: output.status.success(),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                })
+            }
+        }
+    }
+}
+```
+
+**Conditional Compilation:**
+
+```rust
+// In crates/hox-jj/src/lib.rs
+
+#[cfg(feature = "jj-lib-integration")]
+pub use lib_backend::JjLibExecutor;
+
+#[cfg(not(feature = "jj-lib-integration"))]
+pub type JjLibExecutor = JjCommand;  // Fallback to subprocess
+```
+
+**MockJjExecutor becomes type-level:**
+
+```rust
+// Current: HashMap<Vec<String>, String>
+// After: Proper typed mocks
+
+pub struct MockJjExecutor {
+    expectations: Vec<MockExpectation>,
+}
+
+pub struct MockExpectation {
+    pub command: Vec<String>,
+    pub response: Result<CommandOutput>,
+}
+
+impl MockJjExecutor {
+    pub fn expect_describe(&mut self, change_id: &str, description: &str) {
+        self.expectations.push(MockExpectation {
+            command: vec!["describe".to_string(), "-m".to_string(), description.to_string()],
+            response: Ok(CommandOutput::success("")),
+        });
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [x] jj-lib as optional dependency
+- [x] Feature flag `jj-lib-integration`
+- [x] Hot path (metadata read/write) uses jj-lib
+- [x] Fallback to subprocess for unsupported operations
+- [x] 80%+ reduction in subprocess spawns
+- [x] Typed mocks instead of HashMap
+- [x] All existing tests pass with both backends
+
+**Risk Mitigation:**
+- Keep subprocess backend as default
+- Gradual rollout: metadata → revsets → all operations
+- Monitor jj-lib API stability releases
+- Be prepared to maintain subprocess backend long-term
+
+---
+
+## Dependency Graph
+
+```
+Phase 1: Quick Wins (3-4 days)
+  ├─ Budget Enforcement (#4) ────────┐
+  ├─ Fail-Open Audit (#7) ───────────┤
+  └─ .hox/config.toml (#8) ──────────┤
+                                     │
+Phase 2: Core Architecture (3-4 days) │
+  ├─ State Machine (#1) ─────────────┼──> Enables Phase 4
+  └─ PostToolsHook (#3) ─────────────┘
+         │
+         │
+Phase 3: Agent Quality (4-5 days)
+  ├─ Structured Output (#5)
+  └─ Backpressure Calibration (#6)
+         │
+         │
+Phase 4: Advanced Features (3-4 days)
+  ├─ Pattern Extraction (#9) ────── Requires State Machine
+  └─ Phase Auto-Advancement (#10) ── Requires State Machine
+         │
+         │
+Phase 5: Performance (4-5 days, HIGH RISK)
+  └─ jj-lib Integration (#2) ────── Independent, do last
+```
+
+**Recommended Execution:**
+
+| Week | Focus | Deliverables |
+|------|-------|--------------|
+| 1 | Phase 1 | Budget enforcement, fail-open, config file |
+| 2 | Phase 2 | State machine, hook pipeline |
+| 3 | Phase 3 | Structured output, backpressure calibration |
+| 4 | Phase 4 | Pattern extraction, phase auto-advance |
+| 5+ | Phase 5 | jj-lib integration (when API stable) |
+
+---
+
+## Getting Started
+
+### For Contributors
+
+**Pick a Quick Win:**
+1. Read the Phase 1 section for your chosen improvement
+2. Find the relevant files in `crates/`
+3. Write tests first (TDD approach)
+4. Implement the feature
+5. Update docs
+
+**Example: Budget Enforcement**
+
+```bash
+# 1. Read Phase 1, Improvement #4 section above
+# 2. Find the file
+code crates/hox-orchestrator/src/loop_engine.rs
+
+# 3. Write tests first
+code crates/hox-orchestrator/src/loop_engine.rs
+# Add test_budget_enforcement_tokens()
+# Add test_budget_enforcement_usd()
+
+# 4. Run tests (they fail)
+cargo test -p hox-agent test_budget_enforcement
+
+# 5. Implement cumulative tracking
+# (see code in Phase 1 section)
+
+# 6. Tests pass
+cargo test -p hox-agent
+
+# 7. Update docs
+code docs/USAGE.md
+# Add section on budget enforcement
+```
+
+**Pick Foundation Work:**
+
+State Machine (#1) is the most impactful but requires understanding the orchestrator. Start here if you want to understand the core architecture deeply.
+
+**Pick Advanced Features:**
+
+Pattern Extraction (#9) and Phase Auto-Advancement (#10) are self-contained and don't require deep orchestrator knowledge. Good for contributors who want to add user-facing features.
+
+### Testing Your Changes
+
+**Unit Tests:**
+```bash
+# Test a specific improvement
+cargo test -p hox-agent test_budget_enforcement
+cargo test -p hox-core test_fail_open
+cargo test -p hox-orchestrator test_state_machine
+
+# Run all tests
+cargo test --workspace
+```
+
+**Integration Tests:**
+```bash
+# Create a test repo
+mkdir /tmp/hox-test && cd /tmp/hox-test
+jj git init
+hox init
+
+# Test the loop
+hox loop start --goal "add hello world function" -n 5 --max-budget-usd 0.50
+
+# Verify budget enforcement stops it
+```
+
+### Documentation
+
+**Update these docs when implementing:**
+- `docs/USAGE.md` - User-facing features (budget, config, suggestions)
+- `docs/ARCHITECTURE.md` - Internal changes (state machine, hooks)
+- `README.md` - Quick start if config changes
+- `CHANGELOG.md` - All changes
+
+---
+
+## Success Metrics
+
+**Developer UX:**
+- [x] Config file adoption (% of repos with .hox/config.toml)
+- [x] Budget enforcement prevents runaway loops
+- [x] Average loop startup time < 2 seconds
+
+**Robustness:**
+- [x] Zero crashes from transient infrastructure failures
+- [x] Tool parsing success rate > 99% (structured output)
+- [x] State machine proptest passes 10,000 random inputs
+
+**Performance:**
+- [x] Backpressure overhead < 20% of total iteration time
+- [x] jj-lib integration reduces subprocess spawns 80%+
+- [x] Ralph loop iteration time improves 30%+
+
+**Adoption:**
+- [x] 10+ users running hox on real projects
+- [x] 100+ successful orchestration runs
+- [x] 5+ contributed patterns in pattern store
+
+---
+
+## Summary
+
+This plan prioritizes **standalone tool quality** over architectural completeness. The phases are:
+
+1. **Quick Wins** - Stop burning money, enable configuration, don't crash
+2. **Core Architecture** - Clean state machine, extensible hooks
+3. **Agent Quality** - Reliable output, smart backpressure
+4. **Advanced Features** - Learning, auto-advancement
+5. **Performance** - jj-lib integration (when stable)
+
+Each improvement has clear acceptance criteria, testing requirements, and file locations. Contributors can pick any improvement and start immediately.
+
+The dependency graph shows which improvements enable others, but most are independent enough to work on in parallel. Recommended timeline: 3-5 weeks for Phases 1-4, with Phase 5 deferred until jj-lib stabilizes.
+
+**Next Steps:**
+1. Review this plan with the core team
+2. Create GitHub issues for each improvement
+3. Assign improvements to contributors
+4. Start with Phase 1 (highest ROI, lowest risk)

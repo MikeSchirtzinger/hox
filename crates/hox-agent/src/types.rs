@@ -95,9 +95,15 @@ pub struct AnthropicResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnthropicContent {
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     pub content_type: String,
+    #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 /// Severity of a check failure
@@ -218,6 +224,41 @@ pub enum StopReason {
     Error(String),
     /// User cancelled
     Cancelled,
+}
+
+/// Tool call from Anthropic tool_use API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Unique ID for this tool call
+    pub id: String,
+    /// Name of the tool (read_file, write_file, etc.)
+    pub name: String,
+    /// Tool input parameters as JSON
+    pub input: serde_json::Value,
+}
+
+/// Result from executing a tool call
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// ID of the tool call this is a result for
+    pub tool_id: String,
+    /// Whether the tool executed successfully
+    pub success: bool,
+    /// Output or error message from the tool
+    pub output: String,
+}
+
+/// Agent response with structured tool calls
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentResponse {
+    /// Agent's thinking/reasoning text
+    pub thinking: String,
+    /// Tool calls requested by the agent
+    pub tool_calls: Vec<ToolCall>,
+    /// Any additional text output
+    pub text: String,
+    /// Token usage for this response
+    pub usage: Usage,
 }
 
 /// External orchestration state (JSON-serializable)

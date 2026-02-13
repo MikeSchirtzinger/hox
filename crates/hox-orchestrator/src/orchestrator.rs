@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::communication::MessageRouter;
 use crate::phases::{PhaseManager, PhaseStatus};
+use crate::state_machine;
 use crate::workspace::WorkspaceManager;
 
 /// Configuration for an orchestrator
@@ -102,6 +103,8 @@ pub struct Orchestrator<E: JjExecutor> {
     change_id: Option<ChangeId>,
     /// Child orchestrators managed by this orchestrator
     children: HashMap<OrchestratorId, ChildHandle>,
+    /// State machine for observability and pattern tracking
+    sm_state: state_machine::State,
 }
 
 impl Orchestrator<JjCommand> {
@@ -127,6 +130,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             agents: HashMap::new(),
             change_id: None,
             children: HashMap::new(),
+            sm_state: state_machine::State::Idle,
         })
     }
 
@@ -375,6 +379,14 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         info!("Integrating agent work");
         self.state = OrchestratorState::Integrating;
 
+        // State machine transition: Moving to integration
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::AllTasksComplete,
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
+
         // Get all agent changes - try bookmark-based query first, fallback to description
         let queries = RevsetQueries::new(self.executor.clone());
         let agent_changes = match queries.all_orchestrators_by_bookmark().await {
@@ -426,6 +438,44 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Get the orchestrator's change ID
     pub fn change_id(&self) -> Option<&ChangeId> {
         self.change_id.as_ref()
+    }
+
+    /// Execute actions from state machine transition
+    ///
+    /// This method handles the side effects produced by state machine transitions.
+    /// Actions are advisory/observability - they don't replace existing control flow.
+    fn execute_actions(&self, actions: Vec<state_machine::Action>) {
+        for action in actions {
+            match action {
+                state_machine::Action::LogActivity { message } => {
+                    info!("[State Machine] {}", message);
+                }
+                state_machine::Action::RecordPattern { pattern } => {
+                    debug!("[State Machine] Recording pattern: {}", pattern);
+                    // TODO: Integrate with hox-evolution pattern store when available
+                }
+                state_machine::Action::SpawnPlanningAgent { goal } => {
+                    debug!("[State Machine] Would spawn planning agent for: {}", goal);
+                    // Note: Actual spawning happens in existing orchestrator logic
+                }
+                state_machine::Action::SpawnTaskAgents { count } => {
+                    debug!("[State Machine] Would spawn {} task agents", count);
+                    // Note: Actual spawning happens in existing orchestrator logic
+                }
+                state_machine::Action::CreateMerge { description } => {
+                    debug!("[State Machine] Would create merge: {}", description);
+                    // Note: Actual merging happens in integrate() method
+                }
+                state_machine::Action::ResolveConflicts { description } => {
+                    debug!("[State Machine] Would resolve conflicts: {}", description);
+                    // Note: Actual conflict resolution happens in integrate() method
+                }
+                state_machine::Action::SpawnValidator { validation_id } => {
+                    debug!("[State Machine] Would spawn validator: {}", validation_id);
+                    // Note: Actual validation happens in existing orchestrator logic
+                }
+            }
+        }
     }
 
     /// Get active agents
@@ -672,6 +722,16 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         self.state = OrchestratorState::Planning;
         info!("Orchestrator {} starting with delegation", self.config.id);
 
+        // State machine transition: Start orchestration
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::StartOrchestration {
+                goal: "Run hierarchical delegation".to_string(),
+            },
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
+
         // Get phases from the phase manager
         let phases: Vec<Phase> = self.phases.phases().to_vec();
 
@@ -683,6 +743,15 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             info!("Running Phase 0 (contracts) locally: {}", phase.name);
             // TODO: Execute phase 0 locally
         }
+
+        // State machine transition: Planning complete
+        let task_count = delegation_plans.iter().filter(|p| matches!(p, DelegationPlan::ToChild { .. })).count();
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::PlanningComplete { task_count },
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
 
         // Spawn children for delegated phases
         for plan in &delegation_plans {
@@ -761,11 +830,36 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         // All children done -> Integration phase
         self.state = OrchestratorState::Integrating;
+
+        // State machine transition: All tasks complete
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::AllTasksComplete,
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
+
         self.integrate_child_work().await?;
+
+        // State machine transition: Integration clean (simplified - actual conflict detection in integrate_child_work)
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::IntegrationClean,
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
 
         // Validation phase
         self.state = OrchestratorState::Validating;
         // TODO: Run validation phase
+
+        // State machine transition: Validation passed (simplified)
+        let (new_sm_state, actions) = state_machine::transition(
+            self.sm_state.clone(),
+            state_machine::Event::ValidationPassed,
+        );
+        self.sm_state = new_sm_state;
+        self.execute_actions(actions);
 
         self.state = OrchestratorState::Completed;
         info!("Orchestrator {} completed with delegation", self.config.id);

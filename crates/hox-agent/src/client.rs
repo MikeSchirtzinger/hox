@@ -6,9 +6,10 @@
 
 use crate::auth;
 use crate::circuit_breaker::CircuitBreaker;
-use crate::types::{AgentResult, AnthropicMessage, AnthropicRequest, AnthropicResponse, Model};
+use crate::types::{AgentResponse, AgentResult, AnthropicMessage, AnthropicRequest, AnthropicResponse, Model, ToolCall};
 use chrono::Utc;
 use hox_core::{HoxError, Result};
+use serde_json::json;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -53,6 +54,175 @@ impl AgentClient {
     /// Spawn a fresh agent with the given prompt
     pub async fn spawn(&self, prompt: &str, iteration: usize) -> Result<AgentResult> {
         spawn_agent(prompt, iteration, self.model, self.max_tokens).await
+    }
+
+    /// Get tool definitions for Anthropic API
+    fn get_tool_definitions() -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "name": "read_file",
+                "description": "Read the contents of a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to read"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            json!({
+                "name": "write_file",
+                "description": "Write or create a file with given content",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write"
+                        }
+                    },
+                    "required": ["path", "content"]
+                }
+            }),
+            json!({
+                "name": "edit_file",
+                "description": "Make precise edits to an existing file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact text to replace"
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Replacement text"
+                        }
+                    },
+                    "required": ["path", "old_text", "new_text"]
+                }
+            }),
+            json!({
+                "name": "run_command",
+                "description": "Execute a shell command in the workspace",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }),
+        ]
+    }
+
+    /// Send a message with tool_use support
+    pub async fn send_message_with_tools(&self, prompt: &str) -> Result<AgentResponse> {
+        let auth_token = auth::get_auth_token()?;
+        let circuit_breaker = get_circuit_breaker();
+
+        // Check circuit breaker
+        if !circuit_breaker.can_execute() {
+            let time_until_retry = circuit_breaker.time_until_retry();
+            return Err(HoxError::ApiLimit(format!(
+                "Circuit breaker is OPEN - too many API failures. Wait {} seconds before retry.",
+                time_until_retry / 1000
+            )));
+        }
+
+        let payload = json!({
+            "model": self.model.api_name(),
+            "max_tokens": self.max_tokens,
+            "tools": Self::get_tool_definitions(),
+            "messages": [{
+                "role": "user",
+                "content": prompt
+            }]
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", &auth_token)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| HoxError::Api(format!("Failed to send request: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown".to_string());
+            circuit_breaker.record_failure();
+            return Err(HoxError::Api(format!(
+                "Anthropic API error {}: {}",
+                status, error_text
+            )));
+        }
+
+        let anthropic_response: AnthropicResponse = response
+            .json()
+            .await
+            .map_err(|e| HoxError::Api(format!("Failed to parse response: {}", e)))?;
+
+        circuit_breaker.record_success();
+
+        // Parse response into AgentResponse
+        let mut thinking = String::new();
+        let mut tool_calls = Vec::new();
+        let mut text = String::new();
+
+        for content in &anthropic_response.content {
+            match content.content_type.as_str() {
+                "text" => {
+                    if thinking.is_empty() {
+                        thinking = content.text.clone();
+                    } else {
+                        text.push_str(&content.text);
+                    }
+                }
+                "tool_use" => {
+                    // Parse tool_use content block from API response
+                    if let (Some(id), Some(name), Some(input)) = (
+                        &content.id,
+                        &content.name,
+                        &content.input,
+                    ) {
+                        tool_calls.push(ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(AgentResponse {
+            thinking,
+            tool_calls,
+            text,
+            usage: anthropic_response.usage.unwrap_or_default(),
+        })
     }
 }
 

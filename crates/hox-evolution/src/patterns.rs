@@ -6,6 +6,52 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
+/// Trace data from an orchestration run
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationTrace {
+    /// Number of iterations taken
+    pub iterations: usize,
+    /// Type of task (e.g., "rust-feature", "debugging", "refactor")
+    pub task_type: String,
+    /// Whether the orchestration succeeded
+    pub success: bool,
+    /// Backpressure configuration used
+    pub backpressure_config: Option<String>,
+    /// Agent performance metrics
+    pub agent_performance: Option<AgentPerformance>,
+}
+
+/// Performance metrics for an agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPerformance {
+    /// Agent identifier
+    pub agent_id: String,
+    /// Success rate (0.0 to 1.0)
+    pub success_rate: f64,
+    /// Number of tasks completed
+    pub task_count: usize,
+}
+
+/// A pattern-based suggestion for task execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Suggestion {
+    /// Name of the pattern being suggested
+    pub pattern_name: String,
+    /// Descriptive message explaining the suggestion
+    pub message: String,
+    /// Whether this suggestion is actionable (can be applied automatically)
+    pub actionable: bool,
+}
+
+/// Context about a task for pattern matching
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskContext {
+    /// Type of task
+    pub task_type: String,
+    /// Programming language (if applicable)
+    pub language: Option<String>,
+}
+
 /// Category of orchestration pattern
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PatternCategory {
@@ -257,6 +303,96 @@ impl PatternStore {
     }
 }
 
+/// Pattern extraction from successful orchestration runs
+pub struct PatternExtractor {
+    store: PatternStore,
+}
+
+impl PatternExtractor {
+    pub fn new(store: PatternStore) -> Self {
+        Self { store }
+    }
+
+    /// Extract patterns from an orchestration trace
+    pub fn extract_from_trace(&self, trace: &OrchestrationTrace) -> Vec<Pattern> {
+        let mut patterns = Vec::new();
+
+        // Extract fast convergence pattern
+        if trace.iterations < 10 && trace.success {
+            let mut pattern = Pattern::new(
+                "fast_convergence",
+                PatternCategory::Decomposition,
+                format!(
+                    "Task type '{}' converged in {} iterations",
+                    trace.task_type, trace.iterations
+                ),
+            )
+            .with_when(format!("Working on {} tasks", trace.task_type))
+            .with_content(format!(
+                "This task type typically converges quickly. Consider using similar decomposition strategies."
+            ));
+
+            pattern.success_rate = 0.7;
+            patterns.push(pattern);
+        }
+
+        // Extract effective agent pattern
+        if let Some(ref perf) = trace.agent_performance {
+            if perf.success_rate > 0.8 {
+                let mut pattern = Pattern::new(
+                    "effective_agent",
+                    PatternCategory::Communication,
+                    format!(
+                        "Agent {} has {:.0}% success rate on {} tasks",
+                        perf.agent_id,
+                        perf.success_rate * 100.0,
+                        perf.task_count
+                    ),
+                )
+                .with_when(format!("Assigning tasks to {}", perf.agent_id))
+                .with_content(format!(
+                    "Agent {} has proven effective. Consider prioritizing this agent for similar tasks.",
+                    perf.agent_id
+                ));
+
+                pattern.success_rate = perf.success_rate as f32;
+                patterns.push(pattern);
+            }
+        }
+
+        patterns
+    }
+
+    /// Suggest patterns based on task context
+    pub fn suggest(&self, context: &TaskContext) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+
+        // Find patterns matching this task type
+        let all_patterns: Vec<&Pattern> = self.store.approved().into_iter().collect();
+
+        for pattern in all_patterns {
+            // Filter to patterns with high confidence and matching context
+            if pattern.success_rate > 0.6
+                && (pattern.when.contains(&context.task_type)
+                    || pattern.description.contains(&context.task_type))
+            {
+                suggestions.push(Suggestion {
+                    pattern_name: pattern.name.clone(),
+                    message: format!(
+                        "{} (success rate: {:.0}%) - {}",
+                        pattern.name,
+                        pattern.success_rate * 100.0,
+                        pattern.content
+                    ),
+                    actionable: pattern.approved,
+                });
+            }
+        }
+
+        suggestions
+    }
+}
+
 /// Built-in patterns that are always available
 pub fn builtin_patterns() -> Vec<Pattern> {
     vec![
@@ -329,5 +465,149 @@ mod tests {
             assert!(!pattern.name.is_empty());
             assert!(!pattern.content.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn test_extract_fast_convergence() {
+        let dir = tempdir().unwrap();
+        let store = PatternStore::new(dir.path());
+        let extractor = PatternExtractor::new(store);
+
+        let trace = OrchestrationTrace {
+            iterations: 8,
+            task_type: "rust-feature".to_string(),
+            success: true,
+            backpressure_config: None,
+            agent_performance: None,
+        };
+
+        let patterns = extractor.extract_from_trace(&trace);
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].name, "fast_convergence");
+        assert_eq!(patterns[0].success_rate, 0.7);
+    }
+
+    #[tokio::test]
+    async fn test_extract_no_patterns_on_failure() {
+        let dir = tempdir().unwrap();
+        let store = PatternStore::new(dir.path());
+        let extractor = PatternExtractor::new(store);
+
+        let trace = OrchestrationTrace {
+            iterations: 8,
+            task_type: "rust-feature".to_string(),
+            success: false,
+            backpressure_config: None,
+            agent_performance: None,
+        };
+
+        let patterns = extractor.extract_from_trace(&trace);
+        assert!(patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_effective_agent() {
+        let dir = tempdir().unwrap();
+        let store = PatternStore::new(dir.path());
+        let extractor = PatternExtractor::new(store);
+
+        let trace = OrchestrationTrace {
+            iterations: 15,
+            task_type: "debugging".to_string(),
+            success: true,
+            backpressure_config: None,
+            agent_performance: Some(AgentPerformance {
+                agent_id: "agent-123".to_string(),
+                success_rate: 0.85,
+                task_count: 20,
+            }),
+        };
+
+        let patterns = extractor.extract_from_trace(&trace);
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].name, "effective_agent");
+        assert_eq!(patterns[0].success_rate, 0.85);
+    }
+
+    #[tokio::test]
+    async fn test_extract_multiple_patterns() {
+        let dir = tempdir().unwrap();
+        let store = PatternStore::new(dir.path());
+        let extractor = PatternExtractor::new(store);
+
+        let trace = OrchestrationTrace {
+            iterations: 9,
+            task_type: "refactor".to_string(),
+            success: true,
+            backpressure_config: None,
+            agent_performance: Some(AgentPerformance {
+                agent_id: "agent-456".to_string(),
+                success_rate: 0.9,
+                task_count: 30,
+            }),
+        };
+
+        let patterns = extractor.extract_from_trace(&trace);
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_suggest_patterns() {
+        let dir = tempdir().unwrap();
+        let mut store = PatternStore::new(dir.path());
+
+        // Create and save a high-confidence pattern
+        let mut pattern = Pattern::new(
+            "test_pattern",
+            PatternCategory::Decomposition,
+            "A test pattern for rust-feature tasks",
+        )
+        .with_when("Working on rust-feature tasks")
+        .with_content("Use this approach for Rust features");
+
+        pattern.success_rate = 0.75;
+        pattern.approve();
+        store.save(pattern).await.unwrap();
+
+        let extractor = PatternExtractor::new(store);
+
+        let context = TaskContext {
+            task_type: "rust-feature".to_string(),
+            language: Some("rust".to_string()),
+        };
+
+        let suggestions = extractor.suggest(&context);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].pattern_name, "test_pattern");
+        assert!(suggestions[0].actionable);
+    }
+
+    #[tokio::test]
+    async fn test_suggest_filters_low_confidence() {
+        let dir = tempdir().unwrap();
+        let mut store = PatternStore::new(dir.path());
+
+        // Create low-confidence pattern
+        let mut pattern = Pattern::new(
+            "low_confidence",
+            PatternCategory::Decomposition,
+            "Low confidence pattern",
+        )
+        .with_when("Working on rust-feature tasks")
+        .with_content("Don't use this");
+
+        pattern.success_rate = 0.5;
+        pattern.approve();
+        store.save(pattern).await.unwrap();
+
+        let extractor = PatternExtractor::new(store);
+
+        let context = TaskContext {
+            task_type: "rust-feature".to_string(),
+            language: Some("rust".to_string()),
+        };
+
+        let suggestions = extractor.suggest(&context);
+        assert!(suggestions.is_empty());
     }
 }

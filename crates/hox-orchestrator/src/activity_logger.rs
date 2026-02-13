@@ -8,6 +8,7 @@
 //! - Final loop summaries with token usage
 
 use chrono::Utc;
+use hox_core::fail_open::fail_open;
 
 /// Maximum character length for agent output in activity log preview
 const ACTIVITY_LOG_PREVIEW_CHARS: usize = 500;
@@ -30,51 +31,60 @@ impl ActivityLogger {
     }
 
     /// Log the start of a loop
-    pub async fn log_loop_start(
-        &self,
-        task_desc: &str,
-        max_iterations: usize,
-    ) -> Result<(), std::io::Error> {
-        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    ///
+    /// This operation is fail-open - logging failures won't crash the tool
+    pub async fn log_loop_start(&self, task_desc: &str, max_iterations: usize) {
+        fail_open("activity_logger::log_loop_start", || async {
+            let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
 
-        let content = format!(
-            "# Hox Activity Log\n\n## Task: {}\n**Started**: {}\n**Max Iterations**: {}\n\n---\n\n",
-            task_desc.lines().next().unwrap_or(task_desc),
-            timestamp,
-            max_iterations
-        );
+            let content = format!(
+                "# Hox Activity Log\n\n## Task: {}\n**Started**: {}\n**Max Iterations**: {}\n\n---\n\n",
+                task_desc.lines().next().unwrap_or(task_desc),
+                timestamp,
+                max_iterations
+            );
 
-        // Create or overwrite the file
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.output_path)
-            .await?;
+            // Create or overwrite the file
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&self.output_path)
+                .await
+                .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
 
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
+            file.write_all(content.as_bytes())
+                .await
+                .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
+            file.flush()
+                .await
+                .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
 
-        Ok(())
+            Ok(())
+        })
+        .await;
     }
 
     /// Log the start of an iteration
-    pub async fn log_iteration_start(
-        &self,
-        iteration: usize,
-        max: usize,
-    ) -> Result<(), std::io::Error> {
-        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    ///
+    /// This operation is fail-open - logging failures won't crash the tool
+    pub async fn log_iteration_start(&self, iteration: usize, max: usize) {
+        fail_open("activity_logger::log_iteration_start", || async {
+            let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
 
-        let content = format!(
-            "### Iteration {}/{}\n**Time**: {}\n\n",
-            iteration, max, timestamp
-        );
+            let content = format!(
+                "### Iteration {}/{}\n**Time**: {}\n\n",
+                iteration, max, timestamp
+            );
 
-        self.append(&content).await
+            self.append_internal(&content).await
+        })
+        .await;
     }
 
     /// Log the completion of an iteration
+    ///
+    /// This operation is fail-open - logging failures won't crash the tool
     pub async fn log_iteration_complete(
         &self,
         iteration: usize,
@@ -82,117 +92,130 @@ impl ActivityLogger {
         files_created: &[String],
         files_modified: &[String],
         backpressure: &BackpressureResult,
-    ) -> Result<(), std::io::Error> {
-        let mut content = String::new();
+    ) {
+        fail_open("activity_logger::log_iteration_complete", || async {
+            let mut content = String::new();
 
-        // Iteration completion marker
-        content.push_str(&format!("**Iteration {} completed**\n\n", iteration));
+            // Iteration completion marker
+            content.push_str(&format!("**Iteration {} completed**\n\n", iteration));
 
-        // Backpressure status
-        content.push_str("**Backpressure**: ");
-        let check_strs: Vec<String> = backpressure
-            .checks
-            .iter()
-            .map(|c| format!("{}={}", c.name, if c.passed { "PASS" } else { "FAIL" }))
-            .collect();
-        if check_strs.is_empty() {
-            content.push_str("No checks");
-        } else {
-            content.push_str(&check_strs.join(", "));
-        }
-        content.push_str("\n\n");
-
-        // Files changed
-        if !files_created.is_empty() || !files_modified.is_empty() {
-            content.push_str("**Files Changed**:\n");
-
-            for file in files_created {
-                content.push_str(&format!("- Created: {}\n", file));
-            }
-
-            for file in files_modified {
-                content.push_str(&format!("- Modified: {}\n", file));
-            }
-
-            content.push('\n');
-        }
-
-        // Agent output (truncated to first ACTIVITY_LOG_PREVIEW_CHARS chars)
-        let output_preview = if agent_output.chars().count() > ACTIVITY_LOG_PREVIEW_CHARS {
-            let truncated: String = agent_output
-                .chars()
-                .take(ACTIVITY_LOG_PREVIEW_CHARS)
+            // Backpressure status
+            content.push_str("**Backpressure**: ");
+            let check_strs: Vec<String> = backpressure
+                .checks
+                .iter()
+                .map(|c| format!("{}={}", c.name, if c.passed { "PASS" } else { "FAIL" }))
                 .collect();
-            format!("{truncated}...")
-        } else {
-            agent_output.to_string()
-        };
-
-        content.push_str("**Agent Output** (truncated):\n");
-        content.push_str("> ");
-        content.push_str(&output_preview.replace('\n', "\n> "));
-        content.push_str("\n\n");
-
-        // Errors if any
-        if !backpressure.errors.is_empty() {
-            content.push_str("**Errors**:\n");
-            for error in &backpressure.errors {
-                content.push_str(&format!("- {}\n", error));
+            if check_strs.is_empty() {
+                content.push_str("No checks");
+            } else {
+                content.push_str(&check_strs.join(", "));
             }
-            content.push('\n');
-        }
+            content.push_str("\n\n");
 
-        content.push_str("---\n\n");
+            // Files changed
+            if !files_created.is_empty() || !files_modified.is_empty() {
+                content.push_str("**Files Changed**:\n");
 
-        self.append(&content).await
+                for file in files_created {
+                    content.push_str(&format!("- Created: {}\n", file));
+                }
+
+                for file in files_modified {
+                    content.push_str(&format!("- Modified: {}\n", file));
+                }
+
+                content.push('\n');
+            }
+
+            // Agent output (truncated to first ACTIVITY_LOG_PREVIEW_CHARS chars)
+            let output_preview = if agent_output.chars().count() > ACTIVITY_LOG_PREVIEW_CHARS {
+                let truncated: String = agent_output
+                    .chars()
+                    .take(ACTIVITY_LOG_PREVIEW_CHARS)
+                    .collect();
+                format!("{truncated}...")
+            } else {
+                agent_output.to_string()
+            };
+
+            content.push_str("**Agent Output** (truncated):\n");
+            content.push_str("> ");
+            content.push_str(&output_preview.replace('\n', "\n> "));
+            content.push_str("\n\n");
+
+            // Errors if any
+            if !backpressure.errors.is_empty() {
+                content.push_str("**Errors**:\n");
+                for error in &backpressure.errors {
+                    content.push_str(&format!("- {}\n", error));
+                }
+                content.push('\n');
+            }
+
+            content.push_str("---\n\n");
+
+            self.append_internal(&content).await
+        })
+        .await;
     }
 
     /// Log loop completion summary
+    ///
+    /// This operation is fail-open - logging failures won't crash the tool
     pub async fn log_loop_complete(
         &self,
         total_iterations: usize,
         success: bool,
         total_usage: &Usage,
         stop_reason: &str,
-    ) -> Result<(), std::io::Error> {
-        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    ) {
+        fail_open("activity_logger::log_loop_complete", || async {
+            let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
 
-        let success_icon = if success { "✓" } else { "✗" };
-        let success_text = if success {
-            "All checks passed"
-        } else {
-            "Checks failed"
-        };
+            let success_icon = if success { "✓" } else { "✗" };
+            let success_text = if success {
+                "All checks passed"
+            } else {
+                "Checks failed"
+            };
 
-        let content = format!(
-            "## Loop Summary\n\n\
-            **Completed**: {}\n\
-            **Total Iterations**: {}\n\
-            **Success**: {} {}\n\
-            **Stop Reason**: {}\n\
-            **Tokens**: {} input, {} output\n\n",
-            timestamp,
-            total_iterations,
-            success_icon,
-            success_text,
-            stop_reason,
-            total_usage.input_tokens,
-            total_usage.output_tokens
-        );
+            let content = format!(
+                "## Loop Summary\n\n\
+                **Completed**: {}\n\
+                **Total Iterations**: {}\n\
+                **Success**: {} {}\n\
+                **Stop Reason**: {}\n\
+                **Tokens**: {} input, {} output\n\n",
+                timestamp,
+                total_iterations,
+                success_icon,
+                success_text,
+                stop_reason,
+                total_usage.input_tokens,
+                total_usage.output_tokens
+            );
 
-        self.append(&content).await
+            self.append_internal(&content).await
+        })
+        .await;
     }
 
-    /// Append content to the activity log
-    async fn append(&self, content: &str) -> Result<(), std::io::Error> {
+    /// Append content to the activity log (internal, returns Result for fail_open)
+    async fn append_internal(&self, content: &str) -> hox_core::Result<()> {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.output_path)
-            .await?;
+            .await
+            .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
 
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
+        file.write_all(content.as_bytes())
+            .await
+            .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|e| hox_core::HoxError::Io(e.to_string()))?;
 
         Ok(())
     }
@@ -210,10 +233,7 @@ mod tests {
         let hox_dir = temp_dir.path().to_path_buf();
         let logger = ActivityLogger::new(hox_dir.clone());
 
-        logger
-            .log_loop_start("Implement feature X", 20)
-            .await
-            .unwrap();
+        logger.log_loop_start("Implement feature X", 20).await;
 
         let content = fs::read_to_string(hox_dir.join("activity.md"))
             .await
@@ -230,8 +250,8 @@ mod tests {
         let hox_dir = temp_dir.path().to_path_buf();
         let logger = ActivityLogger::new(hox_dir.clone());
 
-        logger.log_loop_start("Test task", 5).await.unwrap();
-        logger.log_iteration_start(1, 5).await.unwrap();
+        logger.log_loop_start("Test task", 5).await;
+        logger.log_iteration_start(1, 5).await;
 
         let backpressure = BackpressureResult {
             checks: vec![
@@ -265,8 +285,7 @@ mod tests {
                 &["Cargo.toml".to_string()],
                 &backpressure,
             )
-            .await
-            .unwrap();
+            .await;
 
         let content = fs::read_to_string(hox_dir.join("activity.md"))
             .await
@@ -291,11 +310,10 @@ mod tests {
             output_tokens: 23456,
         };
 
-        logger.log_loop_start("Test task", 5).await.unwrap();
+        logger.log_loop_start("Test task", 5).await;
         logger
             .log_loop_complete(3, true, &usage, "All checks passed")
-            .await
-            .unwrap();
+            .await;
 
         let content = fs::read_to_string(hox_dir.join("activity.md"))
             .await
@@ -317,12 +335,11 @@ mod tests {
         let long_output = "x".repeat(1000);
         let backpressure = BackpressureResult::all_pass();
 
-        logger.log_loop_start("Test", 1).await.unwrap();
-        logger.log_iteration_start(1, 1).await.unwrap();
+        logger.log_loop_start("Test", 1).await;
+        logger.log_iteration_start(1, 1).await;
         logger
             .log_iteration_complete(1, &long_output, &[], &[], &backpressure)
-            .await
-            .unwrap();
+            .await;
 
         let content = fs::read_to_string(hox_dir.join("activity.md"))
             .await

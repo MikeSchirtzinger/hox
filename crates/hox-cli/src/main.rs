@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hox_agent::{BackpressureResult, ExternalLoopState, LoopConfig, Model};
-use hox_core::{DelegationStrategy, HandoffContext, OrchestratorId, Task};
+use hox_core::{DelegationStrategy, HandoffContext, HoxConfig, OrchestratorId, Task};
 use hox_evolution::{builtin_patterns, PatternStore};
 use hox_jj::{BookmarkManager, JjCommand, JjExecutor, MetadataManager, RevsetQueries};
 use hox_orchestrator::{
@@ -481,7 +481,11 @@ async fn cmd_init(
     tokio::fs::create_dir_all(hox_dir.join("patterns")).await?;
     tokio::fs::create_dir_all(hox_dir.join("metrics")).await?;
 
-    // Create initial config
+    // Write default Hox configuration using HoxConfig
+    HoxConfig::write_default(&path)
+        .context("Failed to write default Hox configuration")?;
+
+    // Create legacy config.json for backward compatibility
     let config = serde_json::json!({
         "version": "0.1.0",
         "patterns_branch": "hox-patterns",
@@ -499,9 +503,12 @@ async fn cmd_init(
 
     println!("Initialized Hox in {:?}", path);
     println!("Created:");
-    println!("  .hox/config.json");
+    println!("  .hox/config.toml      (main configuration)");
+    println!("  .hox/config.json      (legacy)");
     println!("  .hox/patterns/");
     println!("  .hox/metrics/");
+    println!();
+    println!("Configuration written to .hox/config.toml");
     println!();
     println!("To enable auto-formatting with jj fix, add to .jj/repo/config.toml:");
     println!("  [fix.tools.rustfmt]");

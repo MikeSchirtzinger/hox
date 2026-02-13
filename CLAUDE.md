@@ -37,6 +37,7 @@ RUST_LOG=debug cargo test -- --nocapture
 | `hox-orchestrator` | Orchestration: agent spawning, communication, handoffs |
 | `hox-agent` | Agent runtime: circuit breaker, promises, file execution, artifacts |
 | `hox-browser` | Browser automation: CDP sessions, screenshots, verification |
+| `hox-viz` | 3D cyberpunk orchestration visualization |
 | `hox-dashboard` | Ratatui-based observability TUI for orchestration monitoring |
 | `hox-planning` | PRD generation, task decomposition, plan templates |
 | `hox-validation` | Plan validation and constraint checking |
@@ -54,8 +55,30 @@ pub struct Task { /* change-based task */ }
 pub struct AgentId { orchestrator, id, name }
 pub struct HandoffContext { /* agent state for handoffs */ }
 
+// hox-core/src/config.rs
+pub struct HoxConfig { /* repository-level configuration */ }
+
 // hox-core/src/error.rs
 pub type Result<T> = std::result::Result<T, HoxError>;
+
+// hox-agent/src/types.rs
+pub struct ToolCall { /* structured tool invocation */ }
+pub struct ToolResult { /* tool execution result */ }
+pub struct AgentResponse { /* structured agent output */ }
+
+// hox-orchestrator/src/state_machine.rs
+pub enum State { /* orchestrator state */ }
+pub enum Event { /* state machine event */ }
+pub enum Action { /* orchestrator action */ }
+
+// hox-orchestrator/src/hooks.rs
+pub trait PostToolsHook { /* hook pipeline trait */ }
+
+// hox-orchestrator/src/backpressure.rs
+pub struct BackpressureEngine { /* calibrated check scheduling */ }
+
+// hox-evolution/src/patterns.rs
+pub struct PatternExtractor { /* auto-extract patterns from traces */ }
 ```
 
 All errors use the unified `HoxError` enum. Never panic in production code.
@@ -65,11 +88,13 @@ All errors use the unified `HoxError` enum. Never panic in production code.
 ```
 CLI (hox-cli)
     ↓
-Orchestration (hox-orchestrator) - agent spawning, communication, handoffs
+Orchestration (hox-orchestrator) - state machine, hooks, backpressure, agent spawning
     ↓
-JJ Integration (hox-jj) - metadata, revsets, workspaces
+Agent (hox-agent) - Anthropic API (tool_use), file execution, circuit breaker
     ↓
-Core (hox-core) - Types and schemas
+JJ Integration (hox-jj) - metadata, revsets, workspaces, optional jj-lib backend
+    ↓
+Core (hox-core) - Types, config (.hox/config.toml), fail-open utilities, errors
 ```
 
 ## Revset Patterns
