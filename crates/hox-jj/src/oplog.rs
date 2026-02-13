@@ -1,5 +1,6 @@
 //! JJ Operation Log watcher for detecting changes
 
+use hox_core::fail_open::fail_open_with_retries;
 use hox_core::{HoxError, Result};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -129,8 +130,17 @@ impl<E: JjExecutor + 'static> OpLogWatcher<E> {
             loop {
                 poll_interval.tick().await;
 
-                match self.current_operation().await {
-                    Ok(Some((id, desc))) => {
+                // Wrap oplog polling with fail_open_with_retries
+                // Poll failures should retry with backoff, not crash the watcher
+                let poll_result = fail_open_with_retries(
+                    "oplog_watcher::poll",
+                    || async { self.current_operation().await },
+                    3, // Retry up to 3 times
+                )
+                .await;
+
+                match poll_result {
+                    Some(Some((id, desc))) => {
                         if self.last_operation_id.as_ref() != Some(&id) {
                             debug!("New operation detected: {}", id);
 
@@ -149,12 +159,18 @@ impl<E: JjExecutor + 'static> OpLogWatcher<E> {
                             self.last_operation_id = Some(id);
                         }
                     }
-                    Ok(None) => {
+                    Some(None) => {
                         debug!("No operations found");
                     }
-                    Err(e) => {
-                        warn!("Error checking oplog: {}", e);
-                        if let Err(e) = tx.send(OpLogEvent::Error(e.to_string())).await {
+                    None => {
+                        // Poll failed after retries (already logged by fail_open_with_retries)
+                        // Send error event but continue watching
+                        if let Err(e) = tx
+                            .send(OpLogEvent::Error(
+                                "OpLog poll failed after retries".to_string(),
+                            ))
+                            .await
+                        {
                             warn!("OpLog channel send failed: {e}");
                         }
                     }

@@ -32,7 +32,8 @@ pub use auth::get_auth_token;
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use client::{spawn_agent, AgentClient};
 pub use file_executor::{
-    execute_file_operations, file_operation_instructions, validate_path, ExecutionResult,
+    execute_file_operations, execute_file_operations_with_config, execute_tools,
+    file_operation_instructions, validate_path, validate_path_with_config, ExecutionResult,
     FileOperation,
 };
 pub use promise::CompletionPromise;

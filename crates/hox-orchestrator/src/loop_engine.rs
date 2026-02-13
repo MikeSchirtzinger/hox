@@ -10,6 +10,7 @@
 
 use crate::activity_logger::ActivityLogger;
 use crate::backpressure::{run_all_checks_with_fix, run_failed_checks};
+use crate::hooks::{AutoCommitHook, HookContext, HookPipeline, SnapshotHook};
 use crate::prompt::{build_iteration_prompt, parse_context_update};
 use crate::recovery::RecoveryManager;
 use crate::workspace::WorkspaceManager;
@@ -29,6 +30,7 @@ pub struct LoopEngine<E: JjExecutor> {
     config: LoopConfig,
     workspace_path: PathBuf,
     activity_logger: Option<ActivityLogger>,
+    hook_pipeline: HookPipeline,
 }
 
 impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
@@ -39,12 +41,18 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         config: LoopConfig,
         workspace_path: PathBuf,
     ) -> Self {
+        // Create hook pipeline and register hooks
+        let mut hook_pipeline = HookPipeline::new();
+        hook_pipeline.add_hook(Box::new(AutoCommitHook));
+        hook_pipeline.add_hook(Box::new(SnapshotHook));
+
         Self {
             executor,
             workspace_manager,
             config,
             workspace_path,
             activity_logger: None,
+            hook_pipeline,
         }
     }
 
@@ -73,8 +81,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         if let Some(logger) = &self.activity_logger {
             logger
                 .log_loop_start(&task.description, self.config.max_iterations)
-                .await
-                .map_err(|e| HoxError::Io(format!("Failed to log loop start: {}", e)))?;
+                .await;
         }
 
         let mut total_usage = Usage::default();
@@ -109,20 +116,27 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             if let Some(logger) = &self.activity_logger {
                 logger
                     .log_iteration_start(iteration, self.config.max_iterations)
-                    .await
-                    .map_err(|e| HoxError::Io(format!("Failed to log iteration start: {}", e)))?;
+                    .await;
             }
 
             // Check if we're already done
             if backpressure.all_passed() && iteration > 1 {
                 info!("All checks passed, loop complete");
 
+                // Log usage summary
+                let total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+                let cost_usd = (total_usage.input_tokens as f64 * 3.0 / 1_000_000.0)
+                    + (total_usage.output_tokens as f64 * 15.0 / 1_000_000.0);
+                info!(
+                    "Loop usage summary: {} total tokens ({} input, {} output), estimated cost: ${:.4}",
+                    total_tokens, total_usage.input_tokens, total_usage.output_tokens, cost_usd
+                );
+
                 // Log completion
                 if let Some(logger) = &self.activity_logger {
                     logger
                         .log_loop_complete(iteration - 1, true, &total_usage, "All checks passed")
-                        .await
-                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                        .await;
                 }
 
                 return Ok(LoopResult {
@@ -195,6 +209,74 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                 result.output.len()
             );
 
+            // Budget enforcement: Check token and cost limits
+            let total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+
+            // Check cumulative token budget against context window
+            // Note: LoopConfig::max_tokens is used for per-response limit, so we use a hardcoded cumulative limit
+            const CUMULATIVE_TOKEN_LIMIT: usize = 200_000; // Context window size
+            if total_tokens > CUMULATIVE_TOKEN_LIMIT {
+                let msg = format!(
+                    "Token budget exceeded: {} tokens used (limit: {})",
+                    total_tokens, CUMULATIVE_TOKEN_LIMIT
+                );
+                warn!("{}", msg);
+
+                // Log completion
+                if let Some(logger) = &self.activity_logger {
+                    logger
+                        .log_loop_complete(
+                            iteration,
+                            false,
+                            &total_usage,
+                            &format!("Budget exceeded: {}", msg),
+                        )
+                        .await;
+                }
+
+                return Err(HoxError::BudgetExceeded(msg));
+            }
+
+            // Check cost limit if configured (Sonnet pricing: $3/MTok input, $15/MTok output)
+            if let Some(max_budget_usd) = self.config.max_budget_usd {
+                let cost_usd = (total_usage.input_tokens as f64 * 3.0 / 1_000_000.0)
+                    + (total_usage.output_tokens as f64 * 15.0 / 1_000_000.0);
+
+                if cost_usd > max_budget_usd {
+                    let msg = format!(
+                        "Cost budget exceeded: ${:.4} spent (limit: ${:.2})",
+                        cost_usd, max_budget_usd
+                    );
+                    warn!("{}", msg);
+
+                    // Log completion
+                    if let Some(logger) = &self.activity_logger {
+                        logger
+                            .log_loop_complete(
+                                iteration,
+                                false,
+                                &total_usage,
+                                &format!("Budget exceeded: {}", msg),
+                            )
+                            .await;
+                    }
+
+                    return Err(HoxError::BudgetExceeded(msg));
+                }
+            }
+
+            // Context freshness warning at 60% of 200K context window
+            const CONTEXT_WINDOW: usize = 200_000;
+            const FRESHNESS_THRESHOLD: usize = (CONTEXT_WINDOW as f64 * 0.6) as usize;
+            if total_tokens > FRESHNESS_THRESHOLD {
+                info!(
+                    "Context freshness warning: {} tokens used ({}% of {} context window)",
+                    total_tokens,
+                    (total_tokens as f64 / CONTEXT_WINDOW as f64 * 100.0) as usize,
+                    CONTEXT_WINDOW
+                );
+            }
+
             // Parse and execute file operations
             let exec_result = execute_file_operations(&result.output);
             info!("File operations: {}", exec_result.summary());
@@ -258,6 +340,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
             // Update JJ metadata with current state
             self.update_metadata(task, &context, iteration).await?;
 
+            // Execute hooks after iteration
+            let hook_context = HookContext {
+                change_id: task.change_id.clone(),
+                workspace_path: self.workspace_path.clone(),
+                iteration,
+            };
+            let _hook_results = self.hook_pipeline.execute_all(&hook_context).await;
+            // Hooks are fail-open, so we don't check results
+
             // Log iteration completion
             if let Some(logger) = &self.activity_logger {
                 logger
@@ -268,15 +359,21 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                         &iteration_files_modified,
                         &backpressure,
                     )
-                    .await
-                    .map_err(|e| {
-                        HoxError::Io(format!("Failed to log iteration completion: {}", e))
-                    })?;
+                    .await;
             }
 
             // Check for agent-requested stop (legacy format)
             if result.output.contains("[STOP]") || result.output.contains("[DONE]") {
                 info!("Agent requested stop");
+
+                // Log usage summary
+                let total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+                let cost_usd = (total_usage.input_tokens as f64 * 3.0 / 1_000_000.0)
+                    + (total_usage.output_tokens as f64 * 15.0 / 1_000_000.0);
+                info!(
+                    "Loop usage summary: {} total tokens ({} input, {} output), estimated cost: ${:.4}",
+                    total_tokens, total_usage.input_tokens, total_usage.output_tokens, cost_usd
+                );
 
                 // Log completion
                 if let Some(logger) = &self.activity_logger {
@@ -287,8 +384,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                             &total_usage,
                             "Agent requested stop",
                         )
-                        .await
-                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                        .await;
                 }
 
                 return Ok(LoopResult {
@@ -322,6 +418,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                     StopReason::PromiseCompleteWithChecks
                 };
 
+                // Log usage summary
+                let total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+                let cost_usd = (total_usage.input_tokens as f64 * 3.0 / 1_000_000.0)
+                    + (total_usage.output_tokens as f64 * 15.0 / 1_000_000.0);
+                info!(
+                    "Loop usage summary: {} total tokens ({} input, {} output), estimated cost: ${:.4}",
+                    total_tokens, total_usage.input_tokens, total_usage.output_tokens, cost_usd
+                );
+
                 // Log completion
                 if let Some(logger) = &self.activity_logger {
                     let reason_str = match &stop_reason {
@@ -339,8 +444,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                             &total_usage,
                             reason_str,
                         )
-                        .await
-                        .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                        .await;
                 }
 
                 return Ok(LoopResult {
@@ -358,6 +462,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
         // Max iterations reached (only when max_iterations > 0)
         warn!("Max iterations ({}) reached", self.config.max_iterations);
 
+        // Log usage summary
+        let total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+        let cost_usd = (total_usage.input_tokens as f64 * 3.0 / 1_000_000.0)
+            + (total_usage.output_tokens as f64 * 15.0 / 1_000_000.0);
+        info!(
+            "Loop usage summary: {} total tokens ({} input, {} output), estimated cost: ${:.4}",
+            total_tokens, total_usage.input_tokens, total_usage.output_tokens, cost_usd
+        );
+
         // Log completion
         if let Some(logger) = &self.activity_logger {
             logger
@@ -367,8 +480,7 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
                     &total_usage,
                     "Max iterations reached",
                 )
-                .await
-                .map_err(|e| HoxError::Io(format!("Failed to log completion: {}", e)))?;
+                .await;
         }
 
         Ok(LoopResult {

@@ -13,5 +13,8 @@
 mod patterns;
 mod review;
 
-pub use patterns::{builtin_patterns, Pattern, PatternCategory, PatternStore};
+pub use patterns::{
+    builtin_patterns, AgentPerformance, OrchestrationTrace, Pattern, PatternCategory,
+    PatternExtractor, PatternStore, Suggestion, TaskContext,
+};
 pub use review::{ReviewGate, ReviewResult};

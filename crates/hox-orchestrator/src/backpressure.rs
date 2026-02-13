@@ -9,10 +9,13 @@
 //! - Aggressive timeouts: 10s default, don't let slow checks block the loop
 //! - Breaking-only errors: only compilation/syntax errors go into the prompt
 //! - jj fix: auto-format before checks to eliminate formatting conflicts
+//! - Selective checks: fast checks every iteration, slow checks periodically
 
 use hox_agent::{BackpressureResult, CheckOutcome, Severity};
+use hox_core::config::{BackpressureConfig, SlowCheck};
 use hox_core::Result;
 use hox_jj::JjExecutor;
+use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -642,6 +645,274 @@ fn truncate_error_for_prompt(error: &str, max_chars: usize) -> String {
     result
 }
 
+/// Calibrated backpressure engine with fast/slow check separation
+///
+/// Runs fast checks every iteration, slow checks on a configurable schedule.
+/// Includes adaptive escalation when fast checks are churning.
+pub struct BackpressureEngine {
+    config: BackpressureConfig,
+    check_history: CheckHistory,
+}
+
+/// History of check execution patterns
+#[derive(Debug, Clone, Default)]
+struct CheckHistory {
+    /// Track recent fast check failures: (check_name, iteration)
+    fast_check_failures: Vec<(String, usize)>,
+    /// Track when slow checks last ran: check_name -> iteration
+    slow_check_last_run: HashMap<String, usize>,
+}
+
+impl BackpressureEngine {
+    /// Create a new backpressure engine with the given configuration
+    pub fn new(config: BackpressureConfig) -> Self {
+        Self {
+            config,
+            check_history: CheckHistory::default(),
+        }
+    }
+
+    /// Run calibrated checks for this iteration
+    ///
+    /// Fast checks run every iteration. Slow checks run based on:
+    /// - Regular schedule (every N iterations from config)
+    /// - Adaptive escalation (2+ fast check failures in last 3 iterations)
+    /// - Force run (2x normal interval since last slow check)
+    pub fn run_calibrated_checks(
+        &mut self,
+        iteration: usize,
+        workspace_path: &Path,
+    ) -> Result<CalibratedResult> {
+        let start = Instant::now();
+        let mut checks = HashMap::new();
+
+        // Always run fast checks
+        for check_cmd in &self.config.fast_checks {
+            let check_start = Instant::now();
+            let parts: Vec<&str> = check_cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+
+            let program = parts[0];
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+            let cmd = CheckCommand {
+                name: check_cmd.clone(),
+                program: program.to_string(),
+                args,
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
+                severity: Severity::Breaking,
+            };
+
+            let outcome = run_check_with_timeout(workspace_path, &cmd);
+            let elapsed = check_start.elapsed();
+
+            checks.insert(
+                check_cmd.clone(),
+                CheckResult {
+                    success: outcome.passed,
+                    stdout: if outcome.passed {
+                        String::new()
+                    } else {
+                        outcome.output.clone()
+                    },
+                    stderr: if outcome.passed {
+                        String::new()
+                    } else {
+                        outcome.output
+                    },
+                    elapsed,
+                },
+            );
+
+            if !outcome.passed {
+                self.check_history
+                    .fast_check_failures
+                    .push((check_cmd.clone(), iteration));
+            }
+        }
+
+        // Run slow checks based on schedule and adaptive rules
+        for slow_check in &self.config.slow_checks {
+            if self.should_run_slow_check(slow_check, iteration) {
+                let check_start = Instant::now();
+                let parts: Vec<&str> = slow_check.command.split_whitespace().collect();
+                if parts.is_empty() {
+                    continue;
+                }
+
+                let program = parts[0];
+                let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+                let cmd = CheckCommand {
+                    name: slow_check.command.clone(),
+                    program: program.to_string(),
+                    args,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    severity: Severity::Warning,
+                };
+
+                let outcome = run_check_with_timeout(workspace_path, &cmd);
+                let elapsed = check_start.elapsed();
+
+                checks.insert(
+                    slow_check.command.clone(),
+                    CheckResult {
+                        success: outcome.passed,
+                        stdout: if outcome.passed {
+                            String::new()
+                        } else {
+                            outcome.output.clone()
+                        },
+                        stderr: if outcome.passed {
+                            String::new()
+                        } else {
+                            outcome.output
+                        },
+                        elapsed,
+                    },
+                );
+
+                self.check_history
+                    .slow_check_last_run
+                    .insert(slow_check.command.clone(), iteration);
+            }
+        }
+
+        let total_elapsed = start.elapsed();
+        tracing::info!(
+            "Calibrated checks completed in {:?} ({} checks)",
+            total_elapsed,
+            checks.len()
+        );
+
+        Ok(CalibratedResult { checks })
+    }
+
+    /// Determine if a slow check should run on this iteration
+    fn should_run_slow_check(&self, check: &SlowCheck, iteration: usize) -> bool {
+        // Regular schedule: run every N iterations
+        if iteration > 0 && iteration % check.every_n_iterations == 0 {
+            tracing::debug!(
+                "Running slow check '{}' on regular schedule (every {} iterations)",
+                check.command,
+                check.every_n_iterations
+            );
+            return true;
+        }
+
+        // Adaptive escalation: if fast checks are churning, run slow checks for more info
+        let recent_failures = self
+            .check_history
+            .fast_check_failures
+            .iter()
+            .filter(|(_, iter)| iteration >= *iter && iteration - *iter < 3)
+            .count();
+
+        if recent_failures >= 2 {
+            tracing::info!(
+                "Running slow check '{}' due to adaptive escalation ({} fast check failures in last 3 iterations)",
+                check.command,
+                recent_failures
+            );
+            return true;
+        }
+
+        // Force run: if we haven't run in 2x the normal interval, force execution
+        let last_run = self
+            .check_history
+            .slow_check_last_run
+            .get(&check.command)
+            .copied()
+            .unwrap_or(0);
+
+        if iteration > 0 && iteration - last_run > check.every_n_iterations * 2 {
+            tracing::info!(
+                "Running slow check '{}' due to force run (last run at iteration {}, current {})",
+                check.command,
+                last_run,
+                iteration
+            );
+            return true;
+        }
+
+        false
+    }
+}
+
+/// Result from a single check execution
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub elapsed: Duration,
+}
+
+/// Result from calibrated check execution
+#[derive(Debug, Clone)]
+pub struct CalibratedResult {
+    pub checks: HashMap<String, CheckResult>,
+}
+
+impl CalibratedResult {
+    /// Check if all checks passed
+    pub fn all_passed(&self) -> bool {
+        self.checks.values().all(|r| r.success)
+    }
+
+    /// Format failures for agent consumption
+    ///
+    /// Returns a formatted string suitable for inclusion in the agent prompt,
+    /// showing only failed checks with their error output.
+    pub fn format_for_prompt(&self) -> String {
+        let failed: Vec<_> = self
+            .checks
+            .iter()
+            .filter(|(_, result)| !result.success)
+            .collect();
+
+        if failed.is_empty() {
+            return "All checks passed ✓".to_string();
+        }
+
+        let mut output = String::from("## Backpressure Check Failures\n\n");
+        output.push_str(&format!(
+            "{} of {} checks failed. Fix these before proceeding:\n\n",
+            failed.len(),
+            self.checks.len()
+        ));
+
+        for (name, result) in failed {
+            output.push_str(&format!("### Check Failed: {}\n", name));
+            output.push_str("```\n");
+
+            let error_output = if !result.stderr.is_empty() {
+                &result.stderr
+            } else {
+                &result.stdout
+            };
+
+            // Truncate to first 2000 chars to avoid overwhelming the prompt
+            let truncated = if error_output.len() > 2000 {
+                let mut boundary = 2000;
+                while boundary > 0 && !error_output.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                format!("{}... [truncated]", &error_output[..boundary])
+            } else {
+                error_output.to_string()
+            };
+
+            output.push_str(&truncated);
+            output.push_str("\n```\n\n");
+        }
+
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1239,198 @@ line-length = 88
 
         // Standard checks should still run and pass
         assert!(result.all_passed());
+    }
+
+    #[test]
+    fn test_backpressure_engine_new() {
+        let config = BackpressureConfig {
+            fast_checks: vec!["cargo check".to_string()],
+            slow_checks: vec![SlowCheck {
+                command: "cargo test".to_string(),
+                every_n_iterations: 3,
+            }],
+        };
+
+        let engine = BackpressureEngine::new(config.clone());
+        assert_eq!(engine.config.fast_checks.len(), 1);
+        assert_eq!(engine.config.slow_checks.len(), 1);
+        assert_eq!(engine.check_history.fast_check_failures.len(), 0);
+        assert_eq!(engine.check_history.slow_check_last_run.len(), 0);
+    }
+
+    #[test]
+    fn test_should_run_slow_check_regular_schedule() {
+        let config = BackpressureConfig {
+            fast_checks: vec![],
+            slow_checks: vec![SlowCheck {
+                command: "cargo test".to_string(),
+                every_n_iterations: 3,
+            }],
+        };
+
+        let engine = BackpressureEngine::new(config);
+        let slow_check = &engine.config.slow_checks[0];
+
+        // Should NOT run on iteration 1, 2
+        assert!(!engine.should_run_slow_check(slow_check, 1));
+        assert!(!engine.should_run_slow_check(slow_check, 2));
+
+        // Should run on iteration 3, 6, 9
+        assert!(engine.should_run_slow_check(slow_check, 3));
+        assert!(engine.should_run_slow_check(slow_check, 6));
+        assert!(engine.should_run_slow_check(slow_check, 9));
+    }
+
+    #[test]
+    fn test_should_run_slow_check_adaptive_escalation() {
+        let config = BackpressureConfig {
+            fast_checks: vec!["cargo check".to_string()],
+            slow_checks: vec![SlowCheck {
+                command: "cargo test".to_string(),
+                every_n_iterations: 10,
+            }],
+        };
+
+        let mut engine = BackpressureEngine::new(config);
+
+        // Simulate 2 fast check failures in last 3 iterations
+        // At iteration 8: last 3 iterations are 5, 6, 7
+        // So we need failures at 6 and 7 to trigger at iteration 8
+        engine.check_history.fast_check_failures.push(("cargo check".to_string(), 6));
+        engine.check_history.fast_check_failures.push(("cargo check".to_string(), 7));
+
+        let slow_check = &engine.config.slow_checks[0];
+
+        // Should run due to adaptive escalation at iteration 8
+        assert!(engine.should_run_slow_check(slow_check, 8));
+    }
+
+    #[test]
+    fn test_should_run_slow_check_force_run() {
+        let config = BackpressureConfig {
+            fast_checks: vec![],
+            slow_checks: vec![SlowCheck {
+                command: "cargo test".to_string(),
+                every_n_iterations: 5,
+            }],
+        };
+
+        let mut engine = BackpressureEngine::new(config);
+
+        // Last ran at iteration 10
+        engine
+            .check_history
+            .slow_check_last_run
+            .insert("cargo test".to_string(), 10);
+
+        let slow_check = &engine.config.slow_checks[0];
+
+        // Should NOT force run at iteration 19 (10 + 5*2 = 20)
+        assert!(!engine.should_run_slow_check(slow_check, 19));
+
+        // Should force run at iteration 21 (> 2x interval)
+        assert!(engine.should_run_slow_check(slow_check, 21));
+    }
+
+    #[test]
+    fn test_calibrated_result_all_passed() {
+        let mut checks = HashMap::new();
+        checks.insert(
+            "cargo check".to_string(),
+            CheckResult {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+                elapsed: Duration::from_secs(1),
+            },
+        );
+        checks.insert(
+            "cargo test".to_string(),
+            CheckResult {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+                elapsed: Duration::from_secs(5),
+            },
+        );
+
+        let result = CalibratedResult { checks };
+        assert!(result.all_passed());
+    }
+
+    #[test]
+    fn test_calibrated_result_has_failures() {
+        let mut checks = HashMap::new();
+        checks.insert(
+            "cargo check".to_string(),
+            CheckResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: could not compile".to_string(),
+                elapsed: Duration::from_secs(1),
+            },
+        );
+
+        let result = CalibratedResult { checks };
+        assert!(!result.all_passed());
+    }
+
+    #[test]
+    fn test_calibrated_result_format_for_prompt_all_passed() {
+        let mut checks = HashMap::new();
+        checks.insert(
+            "cargo check".to_string(),
+            CheckResult {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+                elapsed: Duration::from_secs(1),
+            },
+        );
+
+        let result = CalibratedResult { checks };
+        let formatted = result.format_for_prompt();
+        assert!(formatted.contains("All checks passed"));
+    }
+
+    #[test]
+    fn test_calibrated_result_format_for_prompt_with_failures() {
+        let mut checks = HashMap::new();
+        checks.insert(
+            "cargo check".to_string(),
+            CheckResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: could not compile\nsrc/main.rs:10:5: error".to_string(),
+                elapsed: Duration::from_secs(1),
+            },
+        );
+
+        let result = CalibratedResult { checks };
+        let formatted = result.format_for_prompt();
+        assert!(formatted.contains("Backpressure Check Failures"));
+        assert!(formatted.contains("cargo check"));
+        assert!(formatted.contains("could not compile"));
+    }
+
+    #[test]
+    fn test_calibrated_result_format_truncates_long_output() {
+        let mut checks = HashMap::new();
+        let long_error = "error: ".to_string() + &"x".repeat(3000);
+        checks.insert(
+            "cargo check".to_string(),
+            CheckResult {
+                success: false,
+                stdout: String::new(),
+                stderr: long_error,
+                elapsed: Duration::from_secs(1),
+            },
+        );
+
+        let result = CalibratedResult { checks };
+        let formatted = result.format_for_prompt();
+        assert!(formatted.contains("[truncated]"));
+        // Should be significantly shorter than the original
+        assert!(formatted.len() < 2500);
     }
 }

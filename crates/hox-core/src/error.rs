@@ -35,6 +35,21 @@ pub enum HoxError {
     #[error("Agent not found: {0}")]
     AgentNotFound(String),
 
+    // Budget and resource errors
+    #[error("Budget exceeded: {0}")]
+    BudgetExceeded(String),
+
+    // Tool errors
+    #[error("Invalid tool input: {0}")]
+    InvalidToolInput(String),
+
+    #[error("Unknown tool: {0}")]
+    UnknownTool(String),
+
+    // File protection errors
+    #[error("Protected file: {0}")]
+    ProtectedFile(String),
+
     // Communication errors
     #[error("Message routing error: {0}")]
     MessageRouting(String),
