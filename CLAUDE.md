@@ -92,10 +92,15 @@ Orchestration (hox-orchestrator) - state machine, hooks, backpressure, agent spa
     ↓
 Agent (hox-agent) - Anthropic API (tool_use), file execution, circuit breaker
     ↓
-JJ Integration (hox-jj) - metadata, revsets, workspaces, optional jj-lib backend
+JJ Integration (hox-jj) - metadata, revsets, workspaces
+    ├── jj-lib (feature-gated, reads only) → ReadonlyRepo for hot-path queries
+    │       ↕ fallback
+    └── CLI subprocess (writes + fallback) → Preserves oplog contract
     ↓
 Core (hox-core) - Types, config (.hox/config.toml), fail-open utilities, errors
 ```
+
+**jj-lib read/write policy:** jj-lib for reads, CLI for writes. One CLI invocation = one oplog entry. Reads that fail via jj-lib automatically fall back to CLI subprocess. The `jj-lib-integration` feature flag gates all jj-lib code; without it, everything uses CLI subprocess.
 
 ## Revset Patterns
 
