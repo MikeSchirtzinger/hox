@@ -19,8 +19,9 @@ use hox_jj::{
 
 use crate::loop_engine::LoopEngine;
 use crate::workspace::WorkspaceManager as WM;
+use hox_isolation::IsolationBackend;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::communication::MessageRouter;
@@ -116,6 +117,10 @@ pub struct Orchestrator<E: JjExecutor> {
     /// per-agent `ForkedOpHeadsStore` instances so each agent gets a fully
     /// isolated op-log rather than just an isolated working copy.
     fork_features: bool,
+    /// Optional isolation backend. When set, `spawn_agent` uses it for workspace
+    /// creation instead of the `WorkspaceManager`. Falls back to `WorkspaceManager`
+    /// when `None`.
+    isolation: Option<Box<dyn IsolationBackend>>,
 }
 
 impl Orchestrator<JjCommand> {
@@ -144,7 +149,29 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             sm_state: state_machine::State::Idle,
             active_agent_change_ids: HashSet::new(),
             fork_features: false,
+            isolation: None,
         })
+    }
+
+    /// Set a custom isolation backend.
+    pub fn with_isolation(mut self, backend: Box<dyn IsolationBackend>) -> Self {
+        self.isolation = Some(backend);
+        self
+    }
+
+    /// Configure filesystem + guarded isolation rooted at `repo_root/.hox-workspaces`.
+    ///
+    /// Safety rules are loaded from `repo_root/.hox/safety-rules.toml` (fail-open: missing
+    /// file = no enforcement).
+    pub fn with_default_isolation(mut self, repo_root: &Path) -> Self {
+        let workspace_dir = repo_root.join(".hox-workspaces");
+        let fs_backend =
+            hox_isolation::FilesystemBackend::new(workspace_dir, repo_root.to_path_buf());
+        let rules = hox_isolation::safety::load_safety_rules(repo_root)
+            .unwrap_or_else(|_| hox_isolation::CompiledSafetyRules::empty());
+        let guarded = hox_isolation::GuardedBackend::new(fs_backend, rules);
+        self.isolation = Some(Box::new(guarded));
+        self
     }
 
     /// Get the orchestrator ID
@@ -232,8 +259,17 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         // Create workspace for the agent and obtain a workspace-scoped executor.
         // All agent operations MUST use this executor so they run inside the
         // agent's working copy, not the main repo working copy.
-        self.workspace_manager.create_workspace(&agent_name).await?;
-        let ws_executor: JjCommand = self.workspace_manager.switch_to(&agent_name).await?;
+        //
+        // When an isolation backend is configured, use it to create the workspace
+        // and derive the executor path from the resulting `IsolatedEnv`. Otherwise
+        // fall back to the existing `WorkspaceManager` code path.
+        let ws_executor: JjCommand = if let Some(ref isolation) = self.isolation {
+            let env = isolation.create(&agent_name).await?;
+            JjCommand::new(&env.workspace_path)
+        } else {
+            self.workspace_manager.create_workspace(&agent_name).await?;
+            self.workspace_manager.switch_to(&agent_name).await?
+        };
 
         // `jj edit @` ensures the workspace working copy is pointing at the
         // current change before we create the agent's change on top of it.
@@ -1256,6 +1292,7 @@ mod tests {
             sm_state: state_machine::State::Idle,
             active_agent_change_ids: HashSet::new(),
             fork_features: false,
+            isolation: None,
         }
     }
 

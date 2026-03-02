@@ -29,6 +29,10 @@ pub struct HoxConfig {
     #[serde(default)]
     pub models: ModelConfig,
 
+    /// Agent execution backend
+    #[serde(default)]
+    pub agent_backend: AgentBackend,
+
     /// Directory for agent workspaces. Defaults to `.hox-workspaces/` relative to repo root.
     #[serde(default)]
     pub workspace_dir: Option<PathBuf>,
@@ -82,6 +86,17 @@ pub struct ModelConfig {
     /// Environment variable containing API key
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
+}
+
+/// Agent execution backend
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentBackend {
+    /// Use the Anthropic HTTP API directly (default)
+    #[default]
+    AnthropicApi,
+    /// Spawn a `claude` CLI subprocess
+    ClaudeCli,
 }
 
 /// Supported programming languages
@@ -211,6 +226,7 @@ impl Default for HoxConfig {
             backpressure: BackpressureConfig::default(),
             models: ModelConfig::default(),
             workspace_dir: None,
+            agent_backend: AgentBackend::default(),
         }
     }
 }
@@ -280,5 +296,47 @@ mod tests {
         // None serialises as absent; deserialized config should use default path
         let loaded: HoxConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(loaded.workspace_dir(), PathBuf::from(".hox-workspaces"));
+    }
+
+    #[test]
+    fn agent_backend_default_is_anthropic_api() {
+        assert_eq!(AgentBackend::default(), AgentBackend::AnthropicApi);
+        let config = HoxConfig::default();
+        assert_eq!(config.agent_backend, AgentBackend::AnthropicApi);
+    }
+
+    #[test]
+    fn agent_backend_serializes_to_kebab_case() {
+        let api = AgentBackend::AnthropicApi;
+        let cli = AgentBackend::ClaudeCli;
+        assert_eq!(
+            serde_json::to_string(&api).unwrap(),
+            r#""anthropic-api""#
+        );
+        assert_eq!(
+            serde_json::to_string(&cli).unwrap(),
+            r#""claude-cli""#
+        );
+    }
+
+    #[test]
+    fn agent_backend_deserializes_from_toml() {
+        let toml_str = r#"agent_backend = "claude-cli""#;
+        // Wrap in a struct that mirrors the field
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            agent_backend: AgentBackend,
+        }
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(w.agent_backend, AgentBackend::ClaudeCli);
+    }
+
+    #[test]
+    fn hox_config_roundtrips_with_claude_cli_backend() {
+        let mut config = HoxConfig::default();
+        config.agent_backend = AgentBackend::ClaudeCli;
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let loaded: HoxConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(loaded.agent_backend, AgentBackend::ClaudeCli);
     }
 }

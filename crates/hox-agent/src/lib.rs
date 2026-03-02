@@ -20,6 +20,7 @@ pub mod artifact_manager;
 mod auth;
 mod circuit_breaker;
 mod client;
+pub mod claude_cli;
 mod file_executor;
 mod promise;
 mod types;

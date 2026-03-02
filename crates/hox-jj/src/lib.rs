@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+pub mod batch_metadata;
 mod bookmarks;
 mod command;
 mod dag;
@@ -22,6 +23,7 @@ mod validate;
 #[cfg(feature = "jj-lib-integration")]
 pub mod lib_backend;
 
+pub use batch_metadata::MetadataBatch;
 pub use bookmarks::{BookmarkInfo, BookmarkManager};
 pub use command::{JjCommand, JjExecutor, JjOutput, MockJjExecutor};
 pub use dag::{AbsorbResult, DagOperations, EvolutionEntry, ParallelizeResult, SplitResult};

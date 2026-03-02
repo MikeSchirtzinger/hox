@@ -13,6 +13,7 @@
 
 mod activity_logger;
 mod backpressure;
+pub mod dag_optimization;
 mod communication;
 mod conflict_resolver;
 mod hooks;
