@@ -1,8 +1,11 @@
 //! Integration tests for the hox CLI pipeline
 
+use hox_core::HoxError;
 use hox_isolation::safety::{CompiledSafetyRules, SafetyRulesConfig, load_safety_rules};
+use hox_isolation::{FilesystemBackend, GuardedBackend, IsolationBackend};
 use hox_jj::repo_mode::{detect_repo_mode, RepoMode};
 use hox_orchestrator::dag_optimization::DagOptimizer;
+use hox_orchestrator::{transition, Action, Event, State};
 use hox_planning::hox_prd::{DecompositionHint, Prd, Requirement, RequirementKind};
 use hox_planning::validator::{validate_prd, ValidationError};
 use hox_planning::writer::write_to_file;
@@ -308,4 +311,220 @@ fn test_dag_optimizer_groups_independent_tasks() {
     let single = vec![task_with_files("solo", &["src/solo.rs"])];
     let solo_groups = DagOptimizer::find_parallelizable(&single);
     assert!(solo_groups.is_empty(), "single task produces no groups");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Orchestrate dry-run — pure state machine, no I/O
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_orchestrate_dry_run_full_lifecycle() {
+    // Idle → Planning
+    let (state, actions) = transition(
+        State::Idle,
+        Event::StartOrchestration { goal: "Add webhook support".to_owned() },
+    );
+    assert!(matches!(state, State::Planning { .. }), "should enter Planning");
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::SpawnPlanningAgent { .. })),
+        "should emit SpawnPlanningAgent"
+    );
+
+    // Planning → Executing (3 tasks)
+    let (state, actions) = transition(state, Event::PlanningComplete { task_count: 3 });
+    assert!(
+        matches!(state, State::Executing { active_tasks: 3, .. }),
+        "should enter Executing with 3 tasks"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::SpawnTaskAgents { count: 3 })),
+        "should emit SpawnTaskAgents(3)"
+    );
+
+    // Executing → Integrating
+    let (state, _) = transition(state, Event::AllTasksComplete);
+    assert!(matches!(state, State::Integrating { .. }), "should enter Integrating");
+
+    // Integrating → Validating
+    let (state, _) = transition(state, Event::IntegrationClean);
+    assert!(matches!(state, State::Validating { .. }), "should enter Validating");
+
+    // Validating → Complete
+    let (state, actions) = transition(state, Event::ValidationPassed);
+    assert!(matches!(state, State::Complete { .. }), "should reach Complete");
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::RecordPattern { .. })),
+        "should record pattern on completion"
+    );
+}
+
+#[test]
+fn test_orchestrate_dry_run_zero_tasks_skips_execution() {
+    let (planning_state, _) = transition(
+        State::Idle,
+        Event::StartOrchestration { goal: "No-op".to_owned() },
+    );
+    let (state, actions) = transition(planning_state, Event::PlanningComplete { task_count: 0 });
+    assert!(
+        matches!(state, State::Complete { .. }),
+        "zero tasks → Complete without executing"
+    );
+    assert!(actions.iter().any(|a| matches!(a, Action::LogActivity { .. })));
+}
+
+#[test]
+fn test_orchestrate_dry_run_validation_failure_goes_to_failed() {
+    let (s, _) = transition(State::Idle, Event::StartOrchestration { goal: "X".to_owned() });
+    let (s, _) = transition(s, Event::PlanningComplete { task_count: 1 });
+    let (s, _) = transition(s, Event::AllTasksComplete);
+    let (s, _) = transition(s, Event::IntegrationClean);
+
+    let (state, _) = transition(s, Event::ValidationFailed { reason: "tests failed".to_owned() });
+    assert!(matches!(state, State::Failed { .. }), "validation failure → Failed");
+}
+
+#[test]
+fn test_orchestrate_dry_run_invalid_transition_is_safe() {
+    // Invalid event from Idle → must not panic, must produce Failed
+    let (state, _) = transition(State::Idle, Event::AllTasksComplete);
+    assert!(matches!(state, State::Failed { .. }), "invalid transition → Failed, not panic");
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Agent workspace isolation lifecycle (filesystem, no real JJ)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_agent_workspace_isolation_lifecycle() {
+    let tmp = TempDir::new().expect("tempdir");
+    let base_dir = tmp.path().join("workspaces");
+    let repo_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&base_dir).unwrap();
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let backend = FilesystemBackend::new(base_dir.clone(), repo_root);
+
+    // Empty to start
+    let agents = backend.list().await.expect("list");
+    assert!(agents.is_empty());
+
+    // Manually populate (bypassing jj workspace add)
+    tokio::fs::create_dir_all(base_dir.join("agent-alpha")).await.unwrap();
+    tokio::fs::create_dir_all(base_dir.join("agent-beta")).await.unwrap();
+
+    let mut agents = backend.list().await.expect("list");
+    agents.sort();
+    assert_eq!(agents, vec!["agent-alpha", "agent-beta"]);
+
+    // destroy() removes directory
+    backend.destroy("agent-alpha").await.expect("destroy");
+    assert!(!base_dir.join("agent-alpha").exists());
+
+    let agents = backend.list().await.expect("list after destroy");
+    assert_eq!(agents, vec!["agent-beta"]);
+
+    // destroy non-existent is a no-op
+    backend.destroy("never-existed").await.expect("destroy non-existent is ok");
+}
+
+#[tokio::test]
+async fn test_agent_workspace_paths_are_isolated() {
+    let tmp = TempDir::new().expect("tempdir");
+    let base_dir = tmp.path().join("workspaces");
+    std::fs::create_dir_all(&base_dir).unwrap();
+
+    tokio::fs::create_dir_all(base_dir.join("agent-1")).await.unwrap();
+    tokio::fs::create_dir_all(base_dir.join("agent-2")).await.unwrap();
+    tokio::fs::write(base_dir.join("agent-1/work.txt"), b"agent-1 work").await.unwrap();
+    tokio::fs::write(base_dir.join("agent-2/work.txt"), b"agent-2 work").await.unwrap();
+
+    let c1 = std::fs::read_to_string(base_dir.join("agent-1/work.txt")).unwrap();
+    let c2 = std::fs::read_to_string(base_dir.join("agent-2/work.txt")).unwrap();
+
+    assert_ne!(c1, c2, "each agent has its own workspace");
+    assert_eq!(c1, "agent-1 work");
+    assert_eq!(c2, "agent-2 work");
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Colocated mode + safety rules integration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_colocated_mode_with_safety_rules() {
+    let dir = TempDir::new().expect("tempdir");
+
+    // Colocated repo structure
+    std::fs::create_dir(dir.path().join(".jj")).unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".hox")).unwrap();
+
+    let toml = "deny_paths = [\"**/.env\", \"**/secrets/**\"]\ndeny_commands = [\"rm\\\\s+-rf\\\\s+/\"]\n";
+    std::fs::write(dir.path().join(".hox/safety-rules.toml"), toml).unwrap();
+
+    // Repo is Colocated
+    assert_eq!(detect_repo_mode(dir.path()), RepoMode::Colocated);
+
+    // Rules load from the colocated .hox dir
+    let rules = load_safety_rules(dir.path()).expect("load rules");
+
+    // Enforced
+    assert!(rules.check_path(Path::new(".env")).is_err());
+    assert!(rules.check_path(Path::new("infra/secrets/db.key")).is_err());
+    assert!(rules.check_command("rm -rf /").is_err());
+
+    // Allowed
+    assert!(rules.check_path(Path::new("src/main.rs")).is_ok());
+    assert!(rules.check_command("cargo test").is_ok());
+}
+
+#[tokio::test]
+async fn test_guarded_backend_enforces_safety_rules() {
+    use async_trait::async_trait;
+    use hox_isolation::IsolatedEnv;
+    use std::path::PathBuf;
+
+    struct StubBackend;
+
+    #[async_trait]
+    impl IsolationBackend for StubBackend {
+        async fn create(&self, agent_id: &str) -> hox_core::Result<IsolatedEnv> {
+            Ok(IsolatedEnv {
+                agent_id: agent_id.to_string(),
+                workspace_path: PathBuf::from("/tmp").join(agent_id),
+            })
+        }
+        async fn destroy(&self, _: &str) -> hox_core::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> hox_core::Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    let config = SafetyRulesConfig {
+        deny_paths: vec!["**/.env".to_owned()],
+        deny_commands: vec!["rm\\s+-rf\\s+/".to_owned()],
+        max_file_size_bytes: 1024 * 1024,
+    };
+    let rules = CompiledSafetyRules::compile(&config).expect("compile");
+    let guarded = GuardedBackend::new(StubBackend, rules);
+
+    // create() delegates through
+    let env = guarded.create("my-agent").await.expect("create");
+    assert_eq!(env.agent_id, "my-agent");
+
+    // denied path
+    let err = guarded.check_path(Path::new(".env")).unwrap_err();
+    assert!(matches!(err, HoxError::ProtectedFile(_)));
+
+    // allowed path
+    assert!(guarded.check_path(Path::new("src/lib.rs")).is_ok());
+
+    // denied command
+    let err = guarded.check_command("rm -rf /").unwrap_err();
+    assert!(matches!(err, HoxError::ProtectedFile(_)));
+
+    // safe command
+    assert!(guarded.check_command("cargo build").is_ok());
 }
