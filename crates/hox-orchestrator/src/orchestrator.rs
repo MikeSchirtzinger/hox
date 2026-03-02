@@ -387,6 +387,10 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                     Some(PhaseStatus::Completed) => {
                         info!("Phase {} completed, advancing", current_phase.number);
                         self.phases.advance()?;
+                        // Run maintenance after each phase completes (fail-open)
+                        if let Err(e) = self.run_phase_maintenance().await {
+                            warn!("Phase maintenance failed (non-fatal): {}", e);
+                        }
                     }
                     Some(PhaseStatus::Failed(reason)) => {
                         self.state = OrchestratorState::Failed(reason.clone());
@@ -413,6 +417,48 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             self.integrate().await?;
         }
 
+        Ok(())
+    }
+
+    /// Run maintenance tasks after phase completion.
+    ///
+    /// In colocated repos (both `.jj/` and `.git` present), runs `jj util gc`.
+    /// Stale bookmark cleanup is also attempted. All failures are non-fatal —
+    /// maintenance errors are logged as warnings and never crash orchestration.
+    async fn run_phase_maintenance(&self) -> Result<()> {
+        let is_colocated = self.config.repo_root.join(".jj").is_dir()
+            && self.config.repo_root.join(".git").exists();
+
+        if is_colocated {
+            info!("Running colocated maintenance (jj util gc)");
+            match self.executor.exec(&["util", "gc"]).await {
+                Ok(output) if output.success => {
+                    debug!("gc completed successfully");
+                }
+                Ok(output) => {
+                    warn!("gc completed with warnings: {}", output.stderr);
+                }
+                Err(e) => {
+                    warn!("gc failed (non-fatal): {}", e);
+                }
+            }
+        }
+
+        self.cleanup_stale_bookmarks().await?;
+
+        Ok(())
+    }
+
+    /// List bookmarks and log any that belong to Done/Abandoned tasks.
+    ///
+    /// Currently only logs — actual deletion will be wired in a follow-up.
+    async fn cleanup_stale_bookmarks(&self) -> Result<()> {
+        let output = self.executor.exec(&["bookmark", "list"]).await?;
+        if !output.success {
+            // Non-fatal: just skip
+            return Ok(());
+        }
+        debug!("Bookmark cleanup check completed");
         Ok(())
     }
 

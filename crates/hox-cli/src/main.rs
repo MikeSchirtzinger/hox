@@ -501,6 +501,25 @@ async fn cmd_init(
     )
     .await?;
 
+    // Add .hox-workspaces/ to .gitignore if not already present
+    let gitignore_path = path.join(".gitignore");
+    let ws_entry = ".hox-workspaces/";
+    let already_ignored = if gitignore_path.exists() {
+        let contents = tokio::fs::read_to_string(&gitignore_path).await.unwrap_or_default();
+        contents.lines().any(|l| l.trim() == ws_entry)
+    } else {
+        false
+    };
+    if !already_ignored {
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&gitignore_path)
+            .await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(format!("\n{}\n", ws_entry).as_bytes()).await?;
+    }
+
     println!("Initialized Hox in {:?}", path);
     println!("Created:");
     println!("  .hox/config.toml      (main configuration)");
@@ -509,6 +528,7 @@ async fn cmd_init(
     println!("  .hox/metrics/");
     println!();
     println!("Configuration written to .hox/config.toml");
+    println!("Added .hox-workspaces/ to .gitignore");
     println!();
     println!("To enable auto-formatting with jj fix, add to .jj/repo/config.toml:");
     println!("  [fix.tools.rustfmt]");

@@ -4,7 +4,7 @@
 //! including protected files, loop defaults, backpressure checks, and model configuration.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::Result;
 
@@ -28,6 +28,10 @@ pub struct HoxConfig {
     /// Model selection
     #[serde(default)]
     pub models: ModelConfig,
+
+    /// Directory for agent workspaces. Defaults to `.hox-workspaces/` relative to repo root.
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
 }
 
 /// Default loop execution parameters
@@ -120,6 +124,13 @@ fn default_api_key_env() -> String {
 }
 
 impl HoxConfig {
+    /// Returns the configured workspace directory, defaulting to `.hox-workspaces/`.
+    pub fn workspace_dir(&self) -> PathBuf {
+        self.workspace_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".hox-workspaces"))
+    }
+
     /// Load configuration from `.hox/config.toml` or use defaults
     pub fn load_or_default(repo_root: &Path) -> Result<Self> {
         let config_path = repo_root.join(".hox/config.toml");
@@ -199,6 +210,7 @@ impl Default for HoxConfig {
             loop_defaults: LoopDefaults::default(),
             backpressure: BackpressureConfig::default(),
             models: ModelConfig::default(),
+            workspace_dir: None,
         }
     }
 }
@@ -228,5 +240,45 @@ impl Default for ModelConfig {
             default: default_model(),
             api_key_env: default_api_key_env(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_dir_returns_default_when_none() {
+        let config = HoxConfig::default();
+        assert_eq!(config.workspace_dir(), PathBuf::from(".hox-workspaces"));
+    }
+
+    #[test]
+    fn workspace_dir_returns_configured_path() {
+        let config = HoxConfig {
+            workspace_dir: Some(PathBuf::from("/custom/workspaces")),
+            ..Default::default()
+        };
+        assert_eq!(config.workspace_dir(), PathBuf::from("/custom/workspaces"));
+    }
+
+    #[test]
+    fn workspace_dir_roundtrips_through_toml() {
+        let config = HoxConfig {
+            workspace_dir: Some(PathBuf::from("custom-ws")),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let loaded: HoxConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(loaded.workspace_dir(), PathBuf::from("custom-ws"));
+    }
+
+    #[test]
+    fn workspace_dir_toml_default_omits_field() {
+        let config = HoxConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        // None serialises as absent; deserialized config should use default path
+        let loaded: HoxConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(loaded.workspace_dir(), PathBuf::from(".hox-workspaces"));
     }
 }

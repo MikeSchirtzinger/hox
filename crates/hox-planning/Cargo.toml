@@ -8,7 +8,14 @@ repository.workspace = true
 
 [dependencies]
 hox-core.workspace = true
+hox-jj.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
