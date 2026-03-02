@@ -19,7 +19,7 @@ use hox_jj::{
 
 use crate::loop_engine::LoopEngine;
 use crate::workspace::WorkspaceManager as WM;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
@@ -105,6 +105,17 @@ pub struct Orchestrator<E: JjExecutor> {
     children: HashMap<OrchestratorId, ChildHandle>,
     /// State machine for observability and pattern tracking
     sm_state: state_machine::State,
+    /// Tier 1: Change IDs currently being worked on by active agents.
+    ///
+    /// DAG restructuring operations (rebase, absorb, parallelize) MUST be
+    /// deferred while this set is non-empty to avoid races with agent writes.
+    active_agent_change_ids: HashSet<String>,
+    /// Tier 2: Whether jj-dev fork features (ForkedOpHeadsStore) are available.
+    ///
+    /// TODO(W6): When the jj-dev fork lands, set this to `true` and wire up
+    /// per-agent `ForkedOpHeadsStore` instances so each agent gets a fully
+    /// isolated op-log rather than just an isolated working copy.
+    fork_features: bool,
 }
 
 impl Orchestrator<JjCommand> {
@@ -131,6 +142,8 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             change_id: None,
             children: HashMap::new(),
             sm_state: state_machine::State::Idle,
+            active_agent_change_ids: HashSet::new(),
+            fork_features: false,
         })
     }
 
@@ -208,11 +221,35 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         info!("Spawning agent {} for: {}", agent_name, task_description);
 
-        // Create workspace for the agent
-        self.workspace_manager.create_workspace(&agent_name).await?;
+        // Tier 2: TODO(W6) – when fork_features is true, allocate a
+        // ForkedOpHeadsStore per agent so each gets a fully isolated op-log.
+        // For now, each agent gets its own working-copy workspace which is
+        // sufficient to prevent filesystem-level races.
+        if self.fork_features {
+            // TODO(W6): ForkedOpHeadsStore per agent
+        }
 
-        // Create a new change for the agent's work
-        let output = self.executor.exec(&["new", "-m", task_description]).await?;
+        // Create workspace for the agent and obtain a workspace-scoped executor.
+        // All agent operations MUST use this executor so they run inside the
+        // agent's working copy, not the main repo working copy.
+        self.workspace_manager.create_workspace(&agent_name).await?;
+        let ws_executor: JjCommand = self.workspace_manager.switch_to(&agent_name).await?;
+
+        // `jj edit @` ensures the workspace working copy is pointing at the
+        // current change before we create the agent's change on top of it.
+        let edit_output = ws_executor.exec(&["edit", "@"]).await?;
+        if !edit_output.success {
+            // Non-fatal: workspace may already be at the right change.
+            debug!(
+                "jj edit @ in agent workspace returned non-success: {}",
+                edit_output.stderr
+            );
+        }
+
+        // Create a new change for the agent's work inside its workspace.
+        let output = ws_executor
+            .exec(&["new", "-m", task_description])
+            .await?;
 
         if !output.success {
             return Err(HoxError::Agent(format!(
@@ -221,26 +258,52 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             )));
         }
 
-        // Set agent metadata and create bookmark assignment
-        let queries = RevsetQueries::new(self.executor.clone());
+        // Set agent metadata and create bookmark assignment using the
+        // workspace-scoped executor so RevsetQueries resolve against the
+        // agent workspace (@), not the main working copy.
+        let queries = RevsetQueries::new(ws_executor.clone());
         if let Some(change_id) = queries.current().await? {
             let metadata = HoxMetadata::new()
                 .with_status(TaskStatus::InProgress)
                 .with_agent(&agent_name)
                 .with_orchestrator(self.config.id.to_string());
 
-            let manager = MetadataManager::new(self.executor.clone());
+            let manager = MetadataManager::new(ws_executor.clone());
             manager.set(&change_id, &metadata).await?;
 
             // Create bookmark assignment for the agent
-            let bookmark_manager = BookmarkManager::new(self.executor.clone());
+            let bookmark_manager = BookmarkManager::new(ws_executor.clone());
             bookmark_manager
                 .assign_task(&agent_name, &change_id)
                 .await?;
+
+            // Tier 1: track this change ID so DAG restructuring is deferred
+            // while the agent is active.
+            self.active_agent_change_ids.insert(change_id);
         }
 
         self.agents.insert(agent_name.clone(), agent_id.clone());
         Ok(agent_id)
+    }
+
+    /// Tier 1: Check whether DAG restructuring (rebase, absorb, parallelize)
+    /// should be deferred because one or more agents are currently active.
+    ///
+    /// Callers MUST check this before invoking `optimize_dag`, `absorb_fixes`,
+    /// or any other operation that rewrites ancestry in the shared DAG.
+    pub fn dag_restructure_deferred(&self) -> bool {
+        !self.active_agent_change_ids.is_empty()
+    }
+
+    /// Tier 1: Mark an agent's change as complete, removing it from the active
+    /// set.  Once all agents have checked in the DAG restructuring gate opens.
+    pub fn complete_agent_change(&mut self, change_id: &str) {
+        self.active_agent_change_ids.remove(change_id);
+    }
+
+    /// Tier 1: Return the set of change IDs currently held by active agents.
+    pub fn active_agent_change_ids(&self) -> &HashSet<String> {
+        &self.active_agent_change_ids
     }
 
     /// Send a mutation message to agents
@@ -939,12 +1002,21 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Use this when you have independent tasks that were created in sequence but can run
     /// in parallel.
     ///
+    /// Tier 1 gate: returns an error if any agents are currently active.  Check
+    /// `dag_restructure_deferred()` before calling if you want a non-fatal path.
+    ///
     /// # Example
     /// ```ignore
     /// // After creating sequential task changes
     /// orchestrator.optimize_dag("heads(bookmarks(glob:\"task-*\"))").await?;
     /// ```
     pub async fn optimize_dag(&self, task_range: &str) -> Result<ParallelizeResult> {
+        if self.dag_restructure_deferred() {
+            return Err(HoxError::Orchestrator(format!(
+                "DAG restructuring deferred: {} agent(s) still active",
+                self.active_agent_change_ids.len()
+            )));
+        }
         info!("Optimizing DAG for parallel execution: {}", task_range);
         let dag_ops = DagOperations::new(self.executor.clone());
         dag_ops.parallelize(task_range).await
@@ -956,12 +1028,20 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// agent branches that introduced the bugs. This is safer than manual cherry-picking
     /// and preserves attribution.
     ///
+    /// Tier 1 gate: returns an error if any agents are currently active.
+    ///
     /// # Example
     /// ```ignore
     /// // After making fixes in integration branch
     /// orchestrator.absorb_fixes(Some(&["src/fixed_file.rs"])).await?;
     /// ```
     pub async fn absorb_fixes(&self, paths: Option<&[&str]>) -> Result<AbsorbResult> {
+        if self.dag_restructure_deferred() {
+            return Err(HoxError::Orchestrator(format!(
+                "DAG restructuring deferred: {} agent(s) still active",
+                self.active_agent_change_ids.len()
+            )));
+        }
         info!("Absorbing fixes back to agent branches");
         let dag_ops = DagOperations::new(self.executor.clone());
         dag_ops.absorb(paths).await
@@ -1106,5 +1186,75 @@ mod tests {
             config.delegation_strategy,
             DelegationStrategy::PhasePerChild
         ));
+    }
+
+    /// Build a minimal Orchestrator backed by a MockJjExecutor for unit tests.
+    ///
+    /// We can't call `with_executor` (it's async and hits jj), so we construct
+    /// the struct directly via a helper that bypasses the async constructor.
+    fn make_test_orchestrator() -> Orchestrator<hox_jj::MockJjExecutor> {
+        use hox_jj::MockJjExecutor;
+        let config = OrchestratorConfig::new(OrchestratorId::root(), "/tmp/repo");
+        let executor = MockJjExecutor::new();
+        let workspace_manager = WorkspaceManager::new(executor.clone());
+        Orchestrator {
+            config,
+            state: OrchestratorState::Initialized,
+            executor,
+            phases: PhaseManager::new(),
+            workspace_manager,
+            message_router: MessageRouter::new(),
+            agents: HashMap::new(),
+            change_id: None,
+            children: HashMap::new(),
+            sm_state: state_machine::State::Idle,
+            active_agent_change_ids: HashSet::new(),
+            fork_features: false,
+        }
+    }
+
+    #[test]
+    fn test_dag_restructure_gate_empty() {
+        let orch = make_test_orchestrator();
+        // No active agents → restructuring is allowed
+        assert!(!orch.dag_restructure_deferred());
+    }
+
+    #[test]
+    fn test_dag_restructure_gate_with_active_agent() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("abc123".to_string());
+        assert!(orch.dag_restructure_deferred());
+    }
+
+    #[test]
+    fn test_complete_agent_change_opens_gate() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("abc123".to_string());
+        orch.active_agent_change_ids
+            .insert("def456".to_string());
+
+        orch.complete_agent_change("abc123");
+        assert!(orch.dag_restructure_deferred()); // def456 still active
+
+        orch.complete_agent_change("def456");
+        assert!(!orch.dag_restructure_deferred()); // gate open
+    }
+
+    #[test]
+    fn test_active_agent_change_ids_accessor() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("xyz789".to_string());
+        assert!(orch.active_agent_change_ids().contains("xyz789"));
+        assert_eq!(orch.active_agent_change_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_fork_features_default_false() {
+        let orch = make_test_orchestrator();
+        assert!(!orch.fork_features);
     }
 }

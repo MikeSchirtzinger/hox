@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-use hox_jj::JjExecutor;
+use hox_jj::{JjCommand, JjExecutor};
 
 /// Information about a workspace
 #[derive(Debug, Clone)]
@@ -136,13 +136,15 @@ impl<E: JjExecutor> WorkspaceManager<E> {
         self.workspaces.get(name)
     }
 
-    /// Switch to a workspace
-    pub async fn switch_to(&self, name: &str) -> Result<()> {
+    /// Switch to a workspace, returning a workspace-scoped executor.
+    ///
+    /// The returned `JjCommand` is rooted at the workspace directory so all
+    /// subsequent jj operations (new, edit, describe …) run inside that
+    /// workspace rather than the main repo working copy.
+    pub async fn switch_to(&self, name: &str) -> Result<JjCommand> {
         if let Some(info) = self.workspaces.get(name) {
             debug!("Switching to workspace {} at {:?}", name, info.path);
-            // Note: JJ workspace switching is typically done by cd'ing to the workspace directory
-            // The executor would need to be recreated for that directory
-            Ok(())
+            Ok(JjCommand::new(&info.path))
         } else {
             Err(HoxError::JjWorkspace(format!(
                 "Workspace {} not found",
