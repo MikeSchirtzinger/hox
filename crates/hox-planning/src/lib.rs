@@ -3,8 +3,10 @@
 //! This crate provides Product Requirements Document (PRD) structures and
 //! decomposition logic to convert PRDs into executable Hox phases and tasks.
 
+pub mod agent;
 pub mod decomposer;
 pub mod decomposition;
+pub mod discovery;
 pub mod hox_prd;
 pub mod importer;
 pub mod prd;
@@ -12,7 +14,9 @@ pub mod templates;
 pub mod validator;
 pub mod writer;
 
+pub use agent::{PlanningAgent, PlanningResult, PlanningTrace};
 pub use decomposer::{DecompositionSummary, PrdDecomposer, TaskDescription};
+pub use discovery::{run_discovery, DiscoveryStep, DISCOVERY_STEPS};
 pub use importer::{import_markdown, LlmClient, MockLlmClient};
 pub use hox_prd::{DecompositionHint, Prd, Requirement, RequirementKind, PRD_SENTINEL};
 pub use prd::ProjectRequirementsDocument;
