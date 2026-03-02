@@ -22,6 +22,8 @@ pub struct DashboardState {
     pub phases: Vec<PhaseProgress>,
     /// Last update timestamp
     pub last_updated: Option<DateTime<Utc>>,
+    /// JJ change DAG topology (None when no agent changes found)
+    pub dag: Option<DagState>,
 }
 
 /// Orchestration session metadata
@@ -297,6 +299,49 @@ pub enum PhaseStatus {
     Active,
     Completed,
     Failed,
+}
+
+/// A file changed in a JJ commit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    /// File path relative to repo root
+    pub path: String,
+    /// Change type: "modified", "added", "deleted", "renamed"
+    pub change_type: String,
+    /// Lines inserted
+    pub insertions: u32,
+    /// Lines deleted
+    pub deletions: u32,
+}
+
+/// A single JJ change node in the DAG
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DagChange {
+    /// Short change ID (12 hex chars)
+    pub change_id: String,
+    /// First line of the commit description
+    pub description: String,
+    /// Parent change IDs
+    pub parents: Vec<String>,
+    /// Bookmarks pointing at this change
+    pub bookmarks: Vec<String>,
+    /// Agent that owns this change (derived from bookmarks matching agent/*/task/*)
+    pub agent_id: Option<String>,
+    /// Files modified (populated by Phase 2 file cache, default empty)
+    pub files: Vec<FileChange>,
+    /// Whether this change has a conflict
+    pub has_conflict: bool,
+    /// Commit timestamp in milliseconds since epoch
+    pub timestamp_ms: u64,
+}
+
+/// DAG topology snapshot
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DagState {
+    /// All changes in the DAG (topologically ordered, root first)
+    pub changes: Vec<DagChange>,
+    /// The root change ID (oldest ancestor in the set)
+    pub root_change_id: Option<String>,
 }
 
 /// Dashboard configuration

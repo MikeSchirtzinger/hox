@@ -21,6 +21,9 @@ mod error;
 pub mod fail_open;
 mod types;
 
-pub use config::{BackpressureConfig, HoxConfig, Language, LoopDefaults, ModelConfig, SlowCheck};
+pub use config::{
+    AgentBackend, AgentConfig, BackpressureConfig, HoxConfig, Language, LoopDefaults, ModelConfig,
+    SlowCheck,
+};
 pub use error::{HoxError, Result};
 pub use types::*;

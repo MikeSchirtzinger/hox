@@ -1143,13 +1143,30 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
 
             let task = Task::new(&change_id, output.stdout.trim());
 
-            // Create loop config
+            // Load config for backend selection
+            let hox_config = HoxConfig::load_or_default(jj.repo_root())?;
+
+            // Create loop config, threading the full AgentConfig so that
+            // OpenAI-compatible model/api_base overrides are honoured.
+            let effective_agent_config = {
+                let mut ac = hox_config.agent.clone();
+                // If the new [agent] table is still at its default (AnthropicApi)
+                // but the legacy agent_backend field was explicitly set, apply it.
+                if ac.backend == hox_core::AgentBackend::AnthropicApi
+                    && hox_config.agent_backend != hox_core::AgentBackend::AnthropicApi
+                {
+                    ac.backend = hox_config.agent_backend.clone();
+                }
+                ac
+            };
             let config = LoopConfig {
                 max_iterations,
                 model: model.into(),
                 backpressure_enabled: !no_backpressure,
                 max_tokens: 16000,
                 max_budget_usd: None,
+                backend: hox_config.agent_backend,
+                agent_config: Some(effective_agent_config),
             };
 
             // Create and run orchestrator
@@ -1285,7 +1302,20 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
             // Next iteration number
             let iteration = state.iteration + 1;
 
-            // Build iteration config
+            // Load config for backend selection
+            let hox_config = HoxConfig::load_or_default(jj.repo_root())?;
+
+            // Build iteration config — thread the full AgentConfig so that
+            // OpenAI-compatible model/api_base overrides are honoured.
+            let effective_ext_agent_config = {
+                let mut ac = hox_config.agent.clone();
+                if ac.backend == hox_core::AgentBackend::AnthropicApi
+                    && hox_config.agent_backend != hox_core::AgentBackend::AnthropicApi
+                {
+                    ac.backend = hox_config.agent_backend.clone();
+                }
+                ac
+            };
             let config = ExternalIterationConfig {
                 task: &task,
                 context: &context,
@@ -1296,6 +1326,8 @@ async fn cmd_loop(action: LoopCommands) -> Result<()> {
                 max_tokens,
                 workspace_path: jj.repo_root().to_path_buf(),
                 run_backpressure: !no_backpressure,
+                backend: hox_config.agent_backend,
+                agent_config: Some(effective_ext_agent_config),
             };
 
             // Run single iteration

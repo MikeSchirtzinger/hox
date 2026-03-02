@@ -177,6 +177,87 @@ function createTaskNode(node) {
 }
 
 /**
+ * Build a Change node (rotated cube / diamond shape + change ID label + optional bookmark).
+ * @param {object} node
+ * @returns {THREE.Group}
+ */
+function createChangeNode(node) {
+    const group = new THREE.Group();
+    const color = node.color || '#00ffff';
+    const geo = new THREE.BoxGeometry(3, 3, 3);
+    const mat = makeEmissiveMaterial(color, node.glow_intensity || 0.6);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = Math.PI / 4;
+    mesh.rotation.z = Math.PI / 4;
+    mesh.userData.rotate = true;
+    group.add(mesh);
+
+    // Bookmark label (yellow) below if present
+    if (node.bookmarks && node.bookmarks.length > 0) {
+        const bm = createTextSprite(node.bookmarks[0], '#ffff00');
+        bm.position.y = -7;
+        group.add(bm);
+    }
+
+    // Change ID label above
+    const label = createTextSprite(node.label || node.id, color);
+    label.scale.set(10, 2.5, 1);
+    label.position.y = 5;
+    group.add(label);
+
+    return group;
+}
+
+/**
+ * Build a File node (tiny sphere + filename label).
+ * @param {object} node
+ * @returns {THREE.Group}
+ */
+function createFileNode(node) {
+    const group = new THREE.Group();
+    const color = node.color || '#00cc99';
+    const geo = new THREE.SphereGeometry(1.5, 8, 8);
+    const mat = makeEmissiveMaterial(color, 0.4, { transparent: true, opacity: 0.6 });
+    group.add(new THREE.Mesh(geo, mat));
+
+    const label = createTextSprite(node.label || node.id, color);
+    label.scale.set(12, 3, 1);
+    label.position.y = -4;
+    group.add(label);
+
+    return group;
+}
+
+/**
+ * Build a Merge node (icosahedron in magenta).
+ * @param {object} node
+ * @returns {THREE.Group}
+ */
+function createMergeNode(node) {
+    const group = new THREE.Group();
+    const color = '#ff00ff';
+    const geo = new THREE.IcosahedronGeometry(4, 0);
+    const mat = makeEmissiveMaterial(color, 0.8);
+    group.add(new THREE.Mesh(geo, mat));
+    group.add(createTextSprite('MERGE', color));
+    return group;
+}
+
+/**
+ * Build a Root node (large semi-transparent octahedron).
+ * @param {object} node
+ * @returns {THREE.Group}
+ */
+function createRootNode(node) {
+    const group = new THREE.Group();
+    const geo = new THREE.OctahedronGeometry(6);
+    const mat = makeEmissiveMaterial('#ffffff', 0.3, { transparent: true, opacity: 0.5 });
+    group.add(new THREE.Mesh(geo, mat));
+    group.add(createTextSprite('ROOT', '#888888'));
+    return group;
+}
+
+/**
  * Main factory: create a Three.js Object3D for a graph node based on its type.
  * @param {object} node - graph node data
  * @returns {THREE.Object3D}
@@ -189,6 +270,14 @@ export function createNodeObject(node) {
             return createPhaseNode(node);
         case 'task':
             return createTaskNode(node);
+        case 'change':
+            return createChangeNode(node);
+        case 'file':
+            return createFileNode(node);
+        case 'merge':
+            return createMergeNode(node);
+        case 'root':
+            return createRootNode(node);
         default:
             return createTaskNode(node);
     }

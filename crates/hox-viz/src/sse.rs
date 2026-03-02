@@ -12,6 +12,9 @@ use futures::stream::Stream;
 use std::convert::Infallible;
 use std::time::Duration;
 
+/// Maximum number of uncached changes to fetch file diffs for per poll cycle.
+const MAX_FILE_DIFF_FETCHES_PER_CYCLE: usize = 5;
+
 /// SSE handler - streams state updates to the frontend
 pub async fn sse_handler(
     State(app): State<SharedState>,
@@ -27,7 +30,47 @@ pub async fn sse_handler(
             let dashboard_result = app.data_source.fetch_state().await;
 
             match dashboard_result {
-                Ok(dashboard_state) => {
+                Ok(mut dashboard_state) => {
+                    // Populate file diffs for DAG changes using the cache
+                    if let Some(ref mut dag) = dashboard_state.dag {
+                        // Collect change_ids not yet in cache
+                        let uncached: Vec<String> = {
+                            let cache = app.file_cache.read().await;
+                            dag.changes
+                                .iter()
+                                .filter(|c| !cache.contains_key(&c.change_id))
+                                .map(|c| c.change_id.clone())
+                                .take(MAX_FILE_DIFF_FETCHES_PER_CYCLE)
+                                .collect()
+                        };
+
+                        // Fetch diffs concurrently for uncached changes
+                        if !uncached.is_empty() {
+                            let fetch_futures: Vec<_> = uncached
+                                .iter()
+                                .map(|id| hox_dashboard::fetch_file_diff(id))
+                                .collect();
+
+                            let results = futures::future::join_all(fetch_futures).await;
+
+                            let mut cache = app.file_cache.write().await;
+                            for (change_id, result) in uncached.iter().zip(results) {
+                                let files = result.unwrap_or_default();
+                                cache.insert(change_id.clone(), files);
+                            }
+                        }
+
+                        // Merge cached files into dag.changes
+                        {
+                            let cache = app.file_cache.read().await;
+                            for change in dag.changes.iter_mut() {
+                                if let Some(files) = cache.get(&change.change_id) {
+                                    change.files = files.clone();
+                                }
+                            }
+                        }
+                    }
+
                     let viz_state = state::translate(&dashboard_state);
 
                     // Full snapshot on first connect or every resync_interval
@@ -75,6 +118,7 @@ pub async fn sse_handler(
                             links: vec![],
                             phases: vec![],
                             oplog: vec![],
+                            view_mode: "orchestration".to_string(),
                         };
                         if let Ok(json) = serde_json::to_string(&empty) {
                             yield Ok(Event::default().event("state").data(json));

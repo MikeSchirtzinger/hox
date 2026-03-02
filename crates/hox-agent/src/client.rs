@@ -403,6 +403,56 @@ pub async fn spawn_agent(
     }
 }
 
+/// Dispatch an agent invocation to the configured backend.
+///
+/// This is the primary entry point used by the loop engine and external
+/// iteration runner.  It delegates to `build_executor` so all three backends
+/// (Anthropic, Claude CLI, OpenAI-compatible) are supported.
+///
+/// For callers that already hold a fine-grained `AgentConfig`, prefer using
+/// `build_executor` directly and calling `executor.execute()`.
+pub async fn dispatch_agent(
+    prompt: &str,
+    iteration: usize,
+    model: Model,
+    max_tokens: usize,
+    backend: &hox_core::AgentBackend,
+    working_dir: &std::path::Path,
+) -> Result<AgentResult> {
+    let executor =
+        crate::executor::build_executor(backend, model, max_tokens, working_dir, None);
+    tracing::info!(
+        "Dispatching iteration {} via {} backend",
+        iteration,
+        executor.name()
+    );
+    executor.execute(prompt, iteration).await
+}
+
+/// Dispatch with full `AgentConfig` override support.
+///
+/// When `agent_config` is present, its `backend` field takes precedence over
+/// the `backend` parameter, allowing callers to pass the richer config loaded
+/// from `.hox/config.toml` without touching all existing call sites.
+pub async fn dispatch_agent_with_config(
+    prompt: &str,
+    iteration: usize,
+    model: Model,
+    max_tokens: usize,
+    backend: &hox_core::AgentBackend,
+    working_dir: &std::path::Path,
+    agent_config: Option<&hox_core::AgentConfig>,
+) -> Result<AgentResult> {
+    let executor =
+        crate::executor::build_executor(backend, model, max_tokens, working_dir, agent_config);
+    tracing::info!(
+        "Dispatching iteration {} via {} backend",
+        iteration,
+        executor.name()
+    );
+    executor.execute(prompt, iteration).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,7 @@ use axum::{
     routing::get,
     Router,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
@@ -17,6 +18,9 @@ pub struct AppState {
     pub config: VizConfig,
     pub current_state: RwLock<Option<state::VizState>>,
     pub data_source: hox_dashboard::JjDataSource,
+    /// Cache of file diffs keyed by change_id.
+    /// JJ changes are immutable: same change_id always yields the same diff.
+    pub file_cache: RwLock<HashMap<String, Vec<hox_dashboard::FileChange>>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -34,6 +38,7 @@ pub async fn serve(config: VizConfig, addr: &str) -> anyhow::Result<()> {
         config,
         current_state: RwLock::new(None),
         data_source: hox_dashboard::JjDataSource::new(dashboard_config),
+        file_cache: RwLock::new(HashMap::new()),
     });
 
     let app = Router::new()

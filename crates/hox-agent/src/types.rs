@@ -1,6 +1,7 @@
 //! Type definitions for Hox agent interactions
 
 use chrono::{DateTime, Utc};
+use hox_core::AgentBackend;
 use serde::{Deserialize, Serialize};
 
 /// Claude model variants
@@ -174,6 +175,18 @@ pub struct LoopConfig {
     pub max_tokens: usize,
     /// Budget cap per agent invocation in USD. None = no limit.
     pub max_budget_usd: Option<f64>,
+    /// Agent execution backend (legacy field — kept for backward compat).
+    ///
+    /// When `agent_config` is also set, `agent_config.backend` takes precedence.
+    #[serde(default)]
+    pub backend: AgentBackend,
+    /// Fine-grained agent configuration loaded from `.hox/config.toml`.
+    ///
+    /// When present, `agent_config.backend` overrides `backend`.  Optional so
+    /// that all existing constructors (`LoopConfig { ..Default::default() }`)
+    /// continue to compile without changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<hox_core::AgentConfig>,
 }
 
 impl Default for LoopConfig {
@@ -184,6 +197,8 @@ impl Default for LoopConfig {
             backpressure_enabled: true,
             max_tokens: 16000,
             max_budget_usd: None,
+            backend: AgentBackend::default(),
+            agent_config: None,
         }
     }
 }
@@ -371,5 +386,7 @@ mod tests {
         assert_eq!(config.model, Model::Sonnet);
         assert!(config.backpressure_enabled);
         assert_eq!(config.max_budget_usd, None);
+        assert_eq!(config.backend, AgentBackend::AnthropicApi);
+        assert!(config.agent_config.is_none());
     }
 }

@@ -15,7 +15,7 @@ html, body {
     overflow: hidden;
     background: #0a0a0f;
     color: #e0e0e0;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
     font-size: 13px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
@@ -118,6 +118,41 @@ html, body {
 
 #top-bar .session-info .value {
     color: #e0e0e0;
+}
+
+/* --- View Mode Badge --- */
+.view-mode-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 2px;
+    border: 1px solid;
+    cursor: default;
+    user-select: none;
+}
+
+.view-mode-badge::after {
+    content: '  (V)';
+    font-size: 9px;
+    font-weight: 400;
+    opacity: 0.5;
+    letter-spacing: 1px;
+}
+
+.view-mode-badge.orch {
+    color: #00ffff;
+    border-color: rgba(0, 255, 255, 0.35);
+    background: rgba(0, 255, 255, 0.06);
+    text-shadow: 0 0 6px rgba(0, 255, 255, 0.4);
+}
+
+.view-mode-badge.dag {
+    color: #ff00ff;
+    border-color: rgba(255, 0, 255, 0.35);
+    background: rgba(255, 0, 255, 0.06);
+    text-shadow: 0 0 6px rgba(255, 0, 255, 0.4);
 }
 
 /* --- Connection Status Indicator --- */
