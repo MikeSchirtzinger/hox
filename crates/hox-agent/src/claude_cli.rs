@@ -79,11 +79,31 @@ pub(crate) fn parse_claude_output(output: &str) -> Result<AgentResponse> {
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .map_err(|e| HoxError::Agent(format!("Failed to parse claude CLI JSON: {}", e)))?;
 
-    let text = v
-        .get("result")
-        .and_then(|r| r.as_str())
-        .unwrap_or("")
-        .to_string();
+    let text = match v.get("result") {
+        None => {
+            return Err(HoxError::Agent(
+                "claude CLI output missing required 'result' field".into(),
+            ))
+        }
+        Some(r) if r.is_null() => {
+            return Err(HoxError::Agent(
+                "claude CLI 'result' field is null".into(),
+            ))
+        }
+        Some(r) => match r.as_str() {
+            None => {
+                return Err(HoxError::Agent(
+                    "claude CLI 'result' field is not a string".into(),
+                ))
+            }
+            Some("") => {
+                return Err(HoxError::Agent(
+                    "claude CLI 'result' field is empty — agent produced no output".into(),
+                ))
+            }
+            Some(s) => s.to_string(),
+        },
+    };
 
     let usage = if let Some(u) = v.get("usage") {
         Usage {
@@ -140,10 +160,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_json_missing_result_field_returns_empty_text() {
+    fn parse_json_missing_result_field_returns_error() {
         let json = r#"{"other_field":"value"}"#;
-        let resp = parse_claude_output(json).unwrap();
-        assert_eq!(resp.text, "");
+        assert!(parse_claude_output(json).is_err());
+    }
+
+    #[test]
+    fn parse_json_null_result_field_returns_error() {
+        let json = r#"{"result":null}"#;
+        assert!(parse_claude_output(json).is_err());
+    }
+
+    #[test]
+    fn parse_json_empty_result_field_returns_error() {
+        let json = r#"{"result":""}"#;
+        assert!(parse_claude_output(json).is_err());
     }
 
     #[test]

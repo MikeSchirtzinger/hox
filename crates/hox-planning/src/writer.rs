@@ -64,6 +64,10 @@ pub async fn write_to_jj<E: JjExecutorLike>(prd: &Prd, executor: &E) -> Result<S
     // Step 2: set the PRD markdown as the change description.
     let describe_out = executor.exec(&["describe", "-m", &md]).await?;
     if !describe_out.success {
+        // Clean up the empty change created by step 1 to avoid leaving dangling
+        // empty changes in the oplog. Ignore abandon errors — the describe error
+        // is what the caller needs to act on.
+        let _ = executor.exec(&["abandon", "@"]).await;
         return Err(HoxError::JjCommand(format!(
             "jj describe failed: {}",
             describe_out.stderr
@@ -143,7 +147,13 @@ mod tests {
     // Minimal mock executor (no hox_jj dependency)
     // -----------------------------------------------------------------------
 
+    /// Mock executor whose responses are keyed on the *first argument* only.
+    ///
+    /// This avoids coupling tests to the exact PRD markdown format: `jj describe`
+    /// is matched on its first arg ("describe"), not on the full `-m <markdown>`
+    /// content, which would silently break on any format change (W14).
     struct MockExec {
+        /// Keyed by first arg (e.g. "new", "describe", "log", "abandon").
         responses: HashMap<String, JjOut>,
         default: JjOut,
     }
@@ -160,20 +170,21 @@ mod tests {
             }
         }
 
-        fn with(mut self, key: &str, out: JjOut) -> Self {
-            self.responses.insert(key.to_owned(), out);
+        /// Register a response for commands whose first argument matches `cmd`.
+        fn with(mut self, cmd: &str, out: JjOut) -> Self {
+            self.responses.insert(cmd.to_owned(), out);
             self
         }
-
     }
 
     #[async_trait]
     impl JjExecutorLike for MockExec {
         async fn exec(&self, args: &[&str]) -> Result<JjOut> {
-            let key = args.join(" ");
+            // Match on the first argument so tests are independent of arg content.
+            let key = args.first().copied().unwrap_or("");
             Ok(self
                 .responses
-                .get(&key)
+                .get(key)
                 .cloned()
                 .unwrap_or_else(|| self.default.clone()))
         }
@@ -183,28 +194,29 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
+    /// Build a minimal valid PRD using `Prd::new()` and field setters.
+    ///
+    /// Using `Prd::new()` + setters (rather than hardcoded markdown) means tests
+    /// remain correct if the serialization format changes (W14).
     fn minimal_prd() -> Prd {
-        Prd {
-            version: "v1".to_owned(),
-            title: "Test PRD".to_owned(),
-            vision: "A test vision statement.".to_owned(),
-            actors: vec!["Developer".to_owned()],
-            success_criteria: vec!["System builds without errors".to_owned()],
-            scope_in: vec!["Core implementation".to_owned()],
-            scope_out: vec![],
-            requirements: vec![Requirement {
-                id: "REQ-001".to_owned(),
-                description: "System must compile.".to_owned(),
-                kind: RequirementKind::Functional,
-            }],
-            constraints: vec!["Must use existing infrastructure.".to_owned()],
-            decomposition_hints: vec![DecompositionHint {
-                name: "Core".to_owned(),
-                description: "Core slice.".to_owned(),
-                estimated_files: vec!["crates/core/".to_owned()],
-                requirements: vec!["REQ-001".to_owned()],
-            }],
-        }
+        let mut prd = Prd::new("Test PRD");
+        prd.vision = "A test vision statement.".to_owned();
+        prd.actors = vec!["Developer".to_owned()];
+        prd.success_criteria = vec!["System builds without errors".to_owned()];
+        prd.scope_in = vec!["Core implementation".to_owned()];
+        prd.requirements = vec![Requirement {
+            id: "REQ-001".to_owned(),
+            description: "System must compile.".to_owned(),
+            kind: RequirementKind::Functional,
+        }];
+        prd.constraints = vec!["Must use existing infrastructure.".to_owned()];
+        prd.decomposition_hints = vec![DecompositionHint {
+            name: "Core".to_owned(),
+            description: "Core slice.".to_owned(),
+            estimated_files: vec!["crates/core/".to_owned()],
+            requirements: vec!["REQ-001".to_owned()],
+        }];
+        prd
     }
 
     // -----------------------------------------------------------------------
@@ -278,8 +290,6 @@ mod tests {
     async fn test_write_to_jj_success() {
         let expected_id = "kpqvuttsabcdefghijklmnopqrstuv";
         let prd = minimal_prd();
-        let md = prd.to_markdown();
-        let describe_key = format!("describe -m {}", md);
 
         let mock = MockExec::new()
             .with(
@@ -291,7 +301,7 @@ mod tests {
                 },
             )
             .with(
-                &describe_key,
+                "describe",
                 JjOut {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -299,7 +309,7 @@ mod tests {
                 },
             )
             .with(
-                "log -r @ -T change_id --no-graph",
+                "log",
                 JjOut {
                     stdout: expected_id.to_owned(),
                     stderr: String::new(),
@@ -331,7 +341,6 @@ mod tests {
     #[tokio::test]
     async fn test_write_to_jj_describe_fails() {
         let prd = minimal_prd();
-        let describe_key = format!("describe -m {}", prd.to_markdown());
 
         let mock = MockExec::new()
             .with(
@@ -343,7 +352,7 @@ mod tests {
                 },
             )
             .with(
-                &describe_key,
+                "describe",
                 JjOut {
                     stdout: String::new(),
                     stderr: "permission denied".to_owned(),
@@ -360,7 +369,6 @@ mod tests {
     #[tokio::test]
     async fn test_write_to_jj_empty_change_id_fails() {
         let prd = minimal_prd();
-        let describe_key = format!("describe -m {}", prd.to_markdown());
 
         let mock = MockExec::new()
             .with(
@@ -372,7 +380,7 @@ mod tests {
                 },
             )
             .with(
-                &describe_key,
+                "describe",
                 JjOut {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -380,7 +388,7 @@ mod tests {
                 },
             )
             .with(
-                "log -r @ -T change_id --no-graph",
+                "log",
                 JjOut {
                     stdout: String::new(), // empty — error case
                     stderr: String::new(),
@@ -392,6 +400,48 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("empty change_id"), "got: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn test_write_to_jj_describe_fails_abandons_change() {
+        // W4: when describe fails, write_to_jj must attempt `jj abandon @`
+        // to clean up the empty change created by `jj new`.
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingExec {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl JjExecutorLike for CapturingExec {
+            async fn exec(&self, args: &[&str]) -> Result<JjOut> {
+                let first = args.first().copied().unwrap_or("").to_owned();
+                self.calls.lock().unwrap().push(first.clone());
+                let success = first != "describe";
+                Ok(JjOut {
+                    stdout: String::new(),
+                    stderr: if success {
+                        String::new()
+                    } else {
+                        "permission denied".to_owned()
+                    },
+                    success,
+                })
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let exec = CapturingExec { calls: calls.clone() };
+
+        let result = write_to_jj(&minimal_prd(), &exec).await;
+        assert!(result.is_err(), "expected error on describe failure");
+
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.contains(&"abandon".to_owned()),
+            "expected `jj abandon` call after describe failure, got: {:?}",
+            seen
+        );
     }
 
     #[test]

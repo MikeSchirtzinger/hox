@@ -43,10 +43,22 @@ impl DagOptimizer {
     ///
     /// Files are extracted from the `HandoffContext::files_touched` field and
     /// from the "## Files Touched" section of the task description.
-    pub fn find_parallelizable(tasks: &[Task]) -> Vec<ParallelGroup> {
+    ///
+    /// `dependency_edges` encodes known JJ ancestry: each `(from, to)` pair
+    /// means `from` must complete before `to` starts. Tasks connected by a
+    /// dependency edge are placed in different groups even when their file
+    /// sets are disjoint.
+    pub fn find_parallelizable(
+        tasks: &[Task],
+        dependency_edges: &[(String, String)],
+    ) -> Vec<ParallelGroup> {
         if tasks.len() < 2 {
             return Vec::new();
         }
+
+        // Build transitive dependency set: for each task, what other tasks
+        // must it NOT run alongside (i.e. tasks in the same dependency chain).
+        let dependent_pairs = transitive_dependency_pairs(dependency_edges);
 
         // Build (change_id, file_set) for each task.
         let file_sets: Vec<(String, HashSet<String>)> = tasks
@@ -54,7 +66,7 @@ impl DagOptimizer {
             .map(|t| (t.change_id.clone(), extract_files(t)))
             .collect();
 
-        greedy_disjoint_groups(&file_sets)
+        greedy_disjoint_groups(&file_sets, &dependent_pairs)
     }
 
     /// Identify types and traits needed by 2+ tasks (shared contracts).
@@ -187,8 +199,59 @@ fn extract_files(task: &Task) -> HashSet<String> {
     files
 }
 
-/// Greedy grouping: build maximal groups of tasks with disjoint file sets.
-fn greedy_disjoint_groups(file_sets: &[(String, HashSet<String>)]) -> Vec<ParallelGroup> {
+/// Compute the set of (a, b) pairs where a and b are in the same dependency
+/// chain (either directly or transitively). Tasks in such a pair must NOT be
+/// placed in the same parallel group.
+///
+/// Each edge `(from, to)` means `from` must complete before `to`. We build
+/// the full transitive closure so that A→B→C means (A,B), (A,C), and (B,C)
+/// are all conflicting pairs.
+fn transitive_dependency_pairs(edges: &[(String, String)]) -> HashSet<(String, String)> {
+    if edges.is_empty() {
+        return HashSet::new();
+    }
+
+    // Build adjacency list (successors).
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (from, to) in edges {
+        adj.entry(from.as_str()).or_default().push(to.as_str());
+    }
+
+    // Collect all node names.
+    let mut all_nodes: HashSet<&str> = HashSet::new();
+    for (from, to) in edges {
+        all_nodes.insert(from.as_str());
+        all_nodes.insert(to.as_str());
+    }
+
+    // For each node, BFS/DFS to find all descendants.
+    let mut pairs: HashSet<(String, String)> = HashSet::new();
+    for &start in &all_nodes {
+        let mut visited: HashSet<&str> = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for &succ in adj.get(node).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if visited.insert(succ) {
+                    // (start, succ) are in a dependency chain.
+                    pairs.insert((start.to_string(), succ.to_string()));
+                    // Also the reverse so the check is symmetric.
+                    pairs.insert((succ.to_string(), start.to_string()));
+                    stack.push(succ);
+                }
+            }
+        }
+    }
+
+    pairs
+}
+
+/// Greedy grouping: build maximal groups of tasks with disjoint file sets,
+/// while respecting the given dependency pairs. Tasks that share a dependency
+/// edge (directly or transitively) are never placed in the same group.
+fn greedy_disjoint_groups(
+    file_sets: &[(String, HashSet<String>)],
+    dependent_pairs: &HashSet<(String, String)>,
+) -> Vec<ParallelGroup> {
     let mut groups: Vec<ParallelGroup> = Vec::new();
     let mut used = vec![false; file_sets.len()];
 
@@ -205,14 +268,26 @@ fn greedy_disjoint_groups(file_sets: &[(String, HashSet<String>)]) -> Vec<Parall
             if used[j] {
                 continue;
             }
+            let candidate_id = &file_sets[j].0;
+            let candidate_files = &file_sets[j].1;
+
+            // Skip if any existing group member is in a dependency chain with
+            // this candidate.
+            let has_dependency = group_ids.iter().any(|gid| {
+                dependent_pairs.contains(&(gid.clone(), candidate_id.clone()))
+                    || dependent_pairs.contains(&(candidate_id.clone(), gid.clone()))
+            });
+            if has_dependency {
+                continue;
+            }
+
             // Only group if both tasks have non-empty file sets and they're disjoint.
-            let candidate = &file_sets[j].1;
-            if !candidate.is_empty()
+            if !candidate_files.is_empty()
                 && !group_files.is_empty()
-                && candidate.is_disjoint(&group_files)
+                && candidate_files.is_disjoint(&group_files)
             {
-                group_ids.push(file_sets[j].0.clone());
-                group_files.extend(candidate.iter().cloned());
+                group_ids.push(candidate_id.clone());
+                group_files.extend(candidate_files.iter().cloned());
                 used[j] = true;
             }
         }
@@ -269,14 +344,14 @@ mod tests {
 
     #[test]
     fn empty_tasks_returns_no_groups() {
-        let groups = DagOptimizer::find_parallelizable(&[]);
+        let groups = DagOptimizer::find_parallelizable(&[], &[]);
         assert!(groups.is_empty());
     }
 
     #[test]
     fn single_task_returns_no_groups() {
         let tasks = vec![task_with_files("abc", "do something", &["src/a.rs"])];
-        let groups = DagOptimizer::find_parallelizable(&tasks);
+        let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
         assert!(groups.is_empty());
     }
 
@@ -286,7 +361,7 @@ mod tests {
             task_with_files("t1", "implement auth", &["src/auth.rs"]),
             task_with_files("t2", "implement storage", &["src/storage.rs"]),
         ];
-        let groups = DagOptimizer::find_parallelizable(&tasks);
+        let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].tasks.len(), 2);
         assert!(groups[0].tasks.contains(&"t1".to_string()));
@@ -299,7 +374,7 @@ mod tests {
             task_with_files("t1", "update lib", &["src/lib.rs", "src/auth.rs"]),
             task_with_files("t2", "fix lib bug", &["src/lib.rs", "src/storage.rs"]),
         ];
-        let groups = DagOptimizer::find_parallelizable(&tasks);
+        let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
         assert!(groups.is_empty(), "overlapping tasks must not be grouped");
     }
 
@@ -310,7 +385,7 @@ mod tests {
             task_with_files("t2", "storage module", &["src/storage.rs"]),
             task_with_files("t3", "shared lib", &["src/auth.rs", "src/extra.rs"]),
         ];
-        let groups = DagOptimizer::find_parallelizable(&tasks);
+        let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
         assert_eq!(groups.len(), 1);
         let ids = &groups[0].tasks;
         assert!(ids.contains(&"t1".to_string()));
@@ -325,8 +400,64 @@ mod tests {
             task_with_files("t1", "do work", &[]),
             task_with_files("t2", "do other work", &[]),
         ];
-        let groups = DagOptimizer::find_parallelizable(&tasks);
+        let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn dependent_tasks_not_grouped_despite_disjoint_files() {
+        // t1 → t2 dependency: they have disjoint files but must not be parallel.
+        let tasks = vec![
+            task_with_files("t1", "define contracts", &["src/contracts.rs"]),
+            task_with_files("t2", "implement feature", &["src/feature.rs"]),
+        ];
+        let edges = vec![("t1".to_string(), "t2".to_string())];
+        let groups = DagOptimizer::find_parallelizable(&tasks, &edges);
+        assert!(
+            groups.is_empty(),
+            "tasks in a dependency chain must not be parallelized"
+        );
+    }
+
+    #[test]
+    fn transitive_dependency_blocks_grouping() {
+        // t1 → t2 → t3: t1 and t3 are transitively dependent.
+        let tasks = vec![
+            task_with_files("t1", "step one", &["src/a.rs"]),
+            task_with_files("t2", "step two", &["src/b.rs"]),
+            task_with_files("t3", "step three", &["src/c.rs"]),
+        ];
+        let edges = vec![
+            ("t1".to_string(), "t2".to_string()),
+            ("t2".to_string(), "t3".to_string()),
+        ];
+        let groups = DagOptimizer::find_parallelizable(&tasks, &edges);
+        // All three are in the same chain — no valid parallel group exists.
+        assert!(
+            groups.is_empty(),
+            "transitive dependents must not be grouped"
+        );
+    }
+
+    #[test]
+    fn independent_tasks_grouped_when_dependency_edges_present() {
+        // t1 → t2, but t3 is independent of both.
+        let tasks = vec![
+            task_with_files("t1", "foundation", &["src/core.rs"]),
+            task_with_files("t2", "builds on t1", &["src/feature.rs"]),
+            task_with_files("t3", "unrelated work", &["src/util.rs"]),
+        ];
+        // t3 can run in parallel with t1 (no dep) but NOT with t2 in a group
+        // alongside t1 (since t1→t2). t1 and t3 have disjoint files and no edge.
+        let edges = vec![("t1".to_string(), "t2".to_string())];
+        let groups = DagOptimizer::find_parallelizable(&tasks, &edges);
+        // t1 and t3 can be grouped; t2 cannot join that group because t2→t1.
+        // Exactly one group should exist and it should not contain t2.
+        let all_group_tasks: Vec<String> = groups.iter().flat_map(|g| g.tasks.clone()).collect();
+        assert!(
+            !all_group_tasks.contains(&"t2".to_string()),
+            "t2 must not be in any parallel group alongside t1"
+        );
     }
 
     // ── extract_shared_contracts ──────────────────────────────────────────────

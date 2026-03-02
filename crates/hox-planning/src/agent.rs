@@ -22,7 +22,8 @@ use hox_core::Result;
 
 use crate::discovery::run_discovery;
 use crate::hox_prd::Prd;
-use crate::importer::{import_markdown, LlmClient};
+use crate::importer::import_markdown;
+use crate::llm::LlmClient;
 use crate::validator::validate_prd;
 use crate::writer::{write_to_file, write_to_jj, JjExecutorLike};
 
@@ -72,6 +73,14 @@ impl PlanningAgent {
     /// The LLM is prompted to emit a complete `hox:prd:v1` document. The
     /// result is parsed and validated. Validation warnings are logged; errors
     /// cause the method to return an `Err`.
+    ///
+    /// # CRIT-8
+    ///
+    /// Unlike [`PlanningAgent::from_file`], auto_plan does **not** fall back to
+    /// a backfilled TODO PRD on LLM failure. If the LLM call fails or returns a
+    /// response that cannot be parsed as a `hox:prd:v1` document, the method
+    /// returns an `Err` directly. Silently producing a TODO-filled PRD would
+    /// give the caller a false impression that planning succeeded.
     pub async fn auto_plan(description: &str, llm: &dyn LlmClient) -> Result<PlanningResult> {
         let mut trace = PlanningTrace::default();
         trace.push(format!("auto_plan: description={:?}", description));
@@ -79,11 +88,22 @@ impl PlanningAgent {
         // 1. Generate PRD via LLM.
         let prompt = build_auto_prompt(description);
         trace.push("auto_plan: calling LLM");
-        let raw = llm.complete(&prompt).await?;
+        let raw = llm.complete_simple(&prompt).await?;
 
-        // 2. Parse the response.
+        // 2. Parse the response directly — do NOT fall back to backfill.
+        //    auto_plan is LLM-driven by contract; a garbage response is an error.
         trace.push("auto_plan: parsing LLM response");
-        let prd = import_markdown(&raw, Some(llm)).await?;
+        let prd = import_markdown(&raw, None).await.and_then(|p| {
+            // Reject backfilled PRDs: if the vision starts with "TODO:" the LLM
+            // did not produce a real PRD.
+            if p.vision.trim_start().starts_with("TODO:") {
+                Err(hox_core::HoxError::ValidationFailed(
+                    "LLM response did not produce a valid hox:prd:v1 document".to_owned(),
+                ))
+            } else {
+                Ok(p)
+            }
+        })?;
         trace.push(format!("auto_plan: parsed PRD title={:?}", prd.title));
 
         // 3. Validate.
@@ -415,6 +435,37 @@ mod tests {
 
         let result = PlanningAgent::auto_plan("Sparse", &llm).await;
         assert!(result.is_err(), "validation should block on empty vision");
+    }
+
+    #[tokio::test]
+    async fn test_auto_plan_garbage_response_returns_error() {
+        // CRIT-8: When the LLM returns garbage (no sentinel), auto_plan must
+        // return an error — it must NOT silently fall back to a TODO-filled PRD.
+        let llm = MockLlmClient {
+            response: "Here is some totally unrelated text with no PRD.".to_owned(),
+        };
+
+        let result = PlanningAgent::auto_plan("My feature", &llm).await;
+        assert!(
+            result.is_err(),
+            "auto_plan must fail when LLM returns garbage, not produce a TODO PRD"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_plan_todo_vision_returns_error() {
+        // CRIT-8: Even if import_markdown produces a Prd, if the vision is a
+        // TODO placeholder the auto_plan call must be rejected.
+        // A backfilled PRD has vision = "TODO: describe the problem this solves."
+        let llm = MockLlmClient {
+            response: String::new(), // empty → backfill path
+        };
+
+        let result = PlanningAgent::auto_plan("Empty", &llm).await;
+        assert!(
+            result.is_err(),
+            "auto_plan must reject TODO-filled PRD from backfill"
+        );
     }
 
     // -----------------------------------------------------------------------

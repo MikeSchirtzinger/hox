@@ -57,7 +57,10 @@ async fn get_state(State(app): State<SharedState>) -> Result<Json<state::VizStat
             *app.current_state.write().await = Some(viz_state.clone());
             Ok(Json(viz_state))
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => {
+            eprintln!("[hox-viz] /api/state error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 

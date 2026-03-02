@@ -45,6 +45,8 @@ pub mod trailers {
     pub const STATUS: &str = "Status";
     /// Change ID trailer key (for linking to jj changes)
     pub const CHANGE_ID: &str = "Change";
+    /// Progress percentage trailer key
+    pub const PROGRESS: &str = "Progress";
 }
 
 /// Parsed commit with trailer metadata
@@ -303,6 +305,14 @@ fn extract_agents_from_trailers(
             }
             agent.change_id = Some(commit.change_id.clone());
 
+            // Parse explicit progress from trailer (e.g., "Progress: 75%")
+            if let Some(progress_str) = commit.trailers.get(trailers::PROGRESS) {
+                let cleaned = progress_str.trim_end_matches('%').trim();
+                if let Ok(pct) = cleaned.parse::<f32>() {
+                    agent.progress = pct / 100.0; // Convert percentage to 0.0-1.0
+                }
+            }
+
             // Count operations for this agent in oplog
             let agent_ops = oplog
                 .iter()
@@ -312,9 +322,9 @@ fn extract_agents_from_trailers(
         }
     }
 
-    // Estimate progress for running agents
+    // Estimate progress for running agents (only if no explicit Progress trailer)
     for (agent_id, agent) in agents_map.iter_mut() {
-        if agent.status == AgentStatus::Running {
+        if agent.status == AgentStatus::Running && agent.progress == 0.0 {
             let agent_ops: Vec<_> = oplog
                 .iter()
                 .filter(|e| e.agent_id.as_ref() == Some(agent_id))

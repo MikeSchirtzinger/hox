@@ -19,7 +19,7 @@ use hox_orchestrator::{
     Orchestrator, OrchestratorConfig, PhaseManager,
 };
 use hox_planning::{
-    cli_tool_prd, example_prd, validate_markdown, LlmClient, PlanningAgent, PrdDecomposer,
+    cli_tool_prd, example_prd, validate_markdown, LlmClient, PlanningAgent, Prd, PrdDecomposer,
     ProjectRequirementsDocument,
 };
 use hox_validation::{ByzantineConsensus, ConsensusConfig, Validator, ValidatorConfig};
@@ -437,7 +437,7 @@ struct PlanArgs {
     #[arg(long)]
     description: Option<String>,
 
-    /// Auto-generate PRD from description (no interactive discovery)
+    /// Auto-generate PRD from description (requires ANTHROPIC_API_KEY in environment)
     #[arg(long)]
     auto: bool,
 
@@ -466,7 +466,7 @@ struct StubLlmClient;
 
 #[async_trait::async_trait]
 impl LlmClient for StubLlmClient {
-    async fn complete(&self, _prompt: &str) -> hox_core::Result<String> {
+    async fn complete(&self, _system: &str, _user: &str) -> hox_core::Result<String> {
         Err(hox_core::HoxError::Other(
             "LLM not configured: set ANTHROPIC_API_KEY and wire up a real LLM client".to_owned(),
         ))
@@ -687,12 +687,49 @@ async fn cmd_orchestrate(
     backend: String,
 ) -> Result<()> {
     // Determine plan source
-    let plan_description = match (&plan, &from_plan) {
+    let (plan_description, loaded_prd) = match (&plan, &from_plan) {
         (_, Some(plan_ref)) => {
-            info!("Loading plan from: {}", plan_ref);
-            format!("plan:{}", plan_ref)
+            info!("Loading PRD from JJ change: {}", plan_ref);
+            // Read the change description via jj log
+            let output = tokio::process::Command::new("jj")
+                .args(["log", "-r", plan_ref, "-T", "description", "--no-graph"])
+                .output()
+                .await
+                .context("Failed to run jj — is jj installed and are you in a JJ repo?")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!(
+                    "Failed to read JJ change '{}': {}",
+                    plan_ref,
+                    stderr.trim()
+                );
+            }
+            let description = String::from_utf8_lossy(&output.stdout).into_owned();
+            match Prd::from_markdown(&description) {
+                Ok(prd) => {
+                    info!("Loaded PRD '{}' from change {}", prd.title, plan_ref);
+                    let desc = if prd.decomposition_hints.is_empty() {
+                        prd.title.clone()
+                    } else {
+                        prd.decomposition_hints
+                            .iter()
+                            .map(|h| h.description.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    };
+                    (desc, Some(prd))
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "Change '{}' does not contain a valid hox PRD. \
+                         The description must start with 'hox:prd:v1'. \
+                         Run 'hox plan --from-file <file>' to create one.",
+                        plan_ref
+                    );
+                }
+            }
         }
-        (Some(p), None) => p.clone(),
+        (Some(p), None) => (p.clone(), None),
         (None, None) => {
             anyhow::bail!(
                 "Provide a plan description or use --from-plan <change-id-or-file>. \
@@ -700,6 +737,10 @@ async fn cmd_orchestrate(
             );
         }
     };
+    // Log loaded PRD title if present
+    if let Some(ref prd) = loaded_prd {
+        info!("Orchestrating from PRD: {}", prd.title);
+    }
 
     info!("Starting orchestration: {}", plan_description);
 
@@ -731,7 +772,9 @@ async fn cmd_orchestrate(
             config = config.with_delegation_strategy(DelegationStrategy::PhasePerChild);
         }
 
-        let mut orchestrator = Orchestrator::with_executor(config, jj.clone()).await?;
+        let mut orchestrator = Orchestrator::with_executor(config, jj.clone())
+            .await?
+            .with_default_isolation(jj.repo_root());
 
         // Setup standard phases
         let phases = PhaseManager::standard_feature_phases(&plan_description);
@@ -778,16 +821,24 @@ async fn cmd_plan(args: PlanArgs) -> Result<()> {
         // --auto + --description: single-shot LLM generation
         (None, true, Some(description)) => {
             info!("Auto-generating PRD for: {}", description);
-            println!("Auto-generating PRD for: {}", description);
-            println!("Note: LLM not configured — returning stub error.");
-            PlanningAgent::auto_plan(description, &llm)
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?
+            if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                eprintln!(
+                    "Error: hox plan --auto requires ANTHROPIC_API_KEY. \
+                     Set it in your environment or use --from-file with a manually written PRD."
+                );
+                std::process::exit(1);
+            }
+            // API key is present but HTTP client not yet wired
+            println!(
+                "Real LLM integration coming soon — API key detected but HTTP client not yet wired. \
+                 Use --from-file for now."
+            );
+            return Ok(());
         }
 
         // --auto without --description
         (None, true, None) => {
-            anyhow::bail!("--auto requires --description");
+            anyhow::bail!("--auto requires --description. Example: hox plan --auto --description \"My feature\"");
         }
 
         // No mode specified: print help

@@ -34,10 +34,15 @@ impl<B: IsolationBackend> GuardedBackend<B> {
 #[async_trait]
 impl<B: IsolationBackend> IsolationBackend for GuardedBackend<B> {
     async fn create(&self, agent_id: &str) -> Result<IsolatedEnv> {
+        // CRIT-1: Enforce safety rules before delegating to inner backend.
+        // Treat the agent_id as a path component to check against deny patterns.
+        self.rules.check_path(Path::new(agent_id))?;
         self.inner.create(agent_id).await
     }
 
     async fn destroy(&self, agent_id: &str) -> Result<()> {
+        // CRIT-1: Enforce safety rules before delegating to inner backend.
+        self.rules.check_path(Path::new(agent_id))?;
         self.inner.destroy(agent_id).await
     }
 
@@ -116,6 +121,33 @@ mod tests {
         let backend = GuardedBackend::new(NoopBackend, rules);
         assert!(backend.check_path(Path::new(".env")).is_ok());
         assert!(backend.check_command("rm -rf /").is_ok());
+    }
+
+    // --- CRIT-1: GuardedBackend actually enforces rules in create/destroy ---
+
+    #[tokio::test]
+    async fn test_create_blocked_by_safety_rules() {
+        // Agent id matching a deny_paths pattern should be rejected.
+        let rules = make_rules(&[".env"], &[]);
+        let backend = GuardedBackend::new(NoopBackend, rules);
+        let err = backend.create(".env").await.unwrap_err();
+        assert!(matches!(err, HoxError::ProtectedFile(_)));
+    }
+
+    #[tokio::test]
+    async fn test_destroy_blocked_by_safety_rules() {
+        let rules = make_rules(&[".env"], &[]);
+        let backend = GuardedBackend::new(NoopBackend, rules);
+        let err = backend.destroy(".env").await.unwrap_err();
+        assert!(matches!(err, HoxError::ProtectedFile(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_allowed_by_safety_rules() {
+        let rules = make_rules(&[".env"], &[]);
+        let backend = GuardedBackend::new(NoopBackend, rules);
+        let env = backend.create("my-agent").await.unwrap();
+        assert_eq!(env.agent_id, "my-agent");
     }
 
     #[tokio::test]

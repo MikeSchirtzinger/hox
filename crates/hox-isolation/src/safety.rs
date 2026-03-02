@@ -13,6 +13,7 @@
 use hox_core::{HoxError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::fs;
 
 fn default_max_file_size() -> u64 {
     10 * 1024 * 1024 // 10 MiB
@@ -110,11 +111,47 @@ impl CompiledSafetyRules {
         }
         Ok(())
     }
+
+    /// W11: Check that a file does not exceed the configured size limit.
+    ///
+    /// Returns `Err(ProtectedFile)` if the file exists and exceeds `max_file_size_bytes`.
+    /// Returns `Ok(())` if the file does not exist (let the actual I/O produce that error).
+    pub fn check_file_size(&self, path: &Path) -> Result<()> {
+        match fs::metadata(path) {
+            Ok(meta) => {
+                let size = meta.len();
+                if size > self.max_file_size_bytes {
+                    return Err(HoxError::ProtectedFile(format!(
+                        "File '{}' is {} bytes, exceeding the {} byte limit",
+                        path.display(),
+                        size,
+                        self.max_file_size_bytes
+                    )));
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(HoxError::Io(format!(
+                "Failed to stat '{}': {}",
+                path.display(),
+                e
+            ))),
+        }
+    }
 }
 
 /// Load safety rules from `<repo_root>/.hox/safety-rules.toml`.
 ///
 /// Returns empty rules (no enforcement) if the file does not exist.
+///
+/// # Sync I/O rationale (W13)
+///
+/// This function intentionally uses blocking `std::fs` I/O. It is called
+/// **once during initialization** (before the async runtime reaches steady
+/// state), so the single blocking read does not stall the executor. Using
+/// `tokio::fs` here would require making callers async and propagating that
+/// change throughout the startup path for no practical benefit. If this
+/// function is ever moved into a hot path, switch to `tokio::fs::read_to_string`.
 pub fn load_safety_rules(repo_root: &Path) -> Result<CompiledSafetyRules> {
     let rules_path = repo_root.join(".hox").join("safety-rules.toml");
 
@@ -235,5 +272,44 @@ mod tests {
         let rules = rules_from_toml(r#"deny_paths = ["**/.env"]"#);
         let err = rules.check_path(Path::new(".env")).unwrap_err();
         assert!(matches!(err, HoxError::ProtectedFile(_)));
+    }
+
+    // --- W11: check_file_size ---
+
+    #[test]
+    fn test_check_file_size_within_limit() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("small.txt");
+        std::fs::write(&file, b"hello").unwrap();
+
+        let config = SafetyRulesConfig {
+            max_file_size_bytes: 1024,
+            ..Default::default()
+        };
+        let rules = CompiledSafetyRules::compile(&config).unwrap();
+        assert!(rules.check_file_size(&file).is_ok());
+    }
+
+    #[test]
+    fn test_check_file_size_exceeds_limit() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("large.txt");
+        // Write 10 bytes, set limit to 5.
+        std::fs::write(&file, b"0123456789").unwrap();
+
+        let config = SafetyRulesConfig {
+            max_file_size_bytes: 5,
+            ..Default::default()
+        };
+        let rules = CompiledSafetyRules::compile(&config).unwrap();
+        let err = rules.check_file_size(&file).unwrap_err();
+        assert!(matches!(err, HoxError::ProtectedFile(_)));
+    }
+
+    #[test]
+    fn test_check_file_size_nonexistent_is_ok() {
+        let rules = CompiledSafetyRules::empty();
+        // Non-existent file should not produce an error — let the actual I/O fail.
+        assert!(rules.check_file_size(Path::new("/nonexistent/path/file.txt")).is_ok());
     }
 }

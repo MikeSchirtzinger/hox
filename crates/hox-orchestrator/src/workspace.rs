@@ -34,8 +34,6 @@ impl<E: JjExecutor> WorkspaceManager<E> {
         let workspace_path = self
             .executor
             .repo_root()
-            .parent()
-            .unwrap_or(self.executor.repo_root())
             .join(format!(".hox-workspaces/{}", name));
 
         info!("Creating workspace {} at {:?}", name, workspace_path);

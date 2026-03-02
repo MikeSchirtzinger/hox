@@ -5,20 +5,10 @@
 //! - **LLM extraction**: for arbitrary markdown, an [`LlmClient`] maps headings to Prd fields.
 //! - **Fallback**: empty [`Prd`] with [`Prd::backfill`] defaults when both paths fail.
 
-use async_trait::async_trait;
 use hox_core::Result;
 
 use crate::hox_prd::{Prd, PRD_SENTINEL};
-
-// ---------------------------------------------------------------------------
-// LlmClient trait
-// ---------------------------------------------------------------------------
-
-/// Abstraction over an LLM completion API for testability.
-#[async_trait]
-pub trait LlmClient: Send + Sync {
-    async fn complete(&self, prompt: &str) -> Result<String>;
-}
+pub use crate::llm::{LlmClient, MockLlmClient};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -119,7 +109,7 @@ Source document:
 
 async fn extract_via_llm(md: &str, client: &dyn LlmClient) -> Result<Prd> {
     let prompt = build_extraction_prompt(md);
-    let response = client.complete(&prompt).await?;
+    let response = client.complete_simple(&prompt).await?;
 
     // The LLM may wrap output in a code fence — strip it.
     let cleaned = strip_code_fence(&response);
@@ -145,22 +135,6 @@ fn strip_code_fence(s: &str) -> &str {
         return after_tag.trim();
     }
     trimmed
-}
-
-// ---------------------------------------------------------------------------
-// MockLlmClient (for tests and examples)
-// ---------------------------------------------------------------------------
-
-/// A mock [`LlmClient`] that returns a fixed response string.
-pub struct MockLlmClient {
-    pub response: String,
-}
-
-#[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn complete(&self, _prompt: &str) -> Result<String> {
-        Ok(self.response.clone())
-    }
 }
 
 // ---------------------------------------------------------------------------

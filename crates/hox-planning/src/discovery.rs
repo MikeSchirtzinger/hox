@@ -82,7 +82,7 @@ pub async fn run_discovery(
     llm: &dyn LlmClient,
 ) -> Result<Prd> {
     let prompt = build_synthesis_prompt(title, responses);
-    match llm.complete(&prompt).await {
+    match llm.complete_simple(&prompt).await {
         Ok(raw) => {
             let cleaned = strip_code_fence(&raw);
             match Prd::from_markdown(cleaned) {

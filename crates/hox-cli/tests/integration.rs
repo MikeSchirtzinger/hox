@@ -284,7 +284,7 @@ fn test_dag_optimizer_groups_independent_tasks() {
         task_with_files("storage-task", &["crates/hox-agent/src/storage.rs"]),
     ];
 
-    let groups = DagOptimizer::find_parallelizable(&tasks);
+    let groups = DagOptimizer::find_parallelizable(&tasks, &[]);
     assert_eq!(groups.len(), 1, "should produce one parallel group");
     assert_eq!(groups[0].tasks.len(), 2, "group should contain both tasks");
     assert!(
@@ -301,7 +301,7 @@ fn test_dag_optimizer_groups_independent_tasks() {
         task_with_files("t1", &["crates/hox-core/src/lib.rs"]),
         task_with_files("t2", &["crates/hox-core/src/lib.rs", "crates/other/src/main.rs"]),
     ];
-    let no_groups = DagOptimizer::find_parallelizable(&overlapping);
+    let no_groups = DagOptimizer::find_parallelizable(&overlapping, &[]);
     assert!(
         no_groups.is_empty(),
         "overlapping tasks should not be grouped"
@@ -309,7 +309,7 @@ fn test_dag_optimizer_groups_independent_tasks() {
 
     // Single task → no groups
     let single = vec![task_with_files("solo", &["src/solo.rs"])];
-    let solo_groups = DagOptimizer::find_parallelizable(&single);
+    let solo_groups = DagOptimizer::find_parallelizable(&single, &[]);
     assert!(solo_groups.is_empty(), "single task produces no groups");
 }
 

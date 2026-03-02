@@ -27,6 +27,8 @@ pub enum ValidationError {
     MissingSentinel,
     ParseError(String),
     EmptyVision,
+    /// All content in this field is a TODO placeholder — the LLM did not fill it in.
+    TodoPlaceholder(String),
     NoSuccessCriteria,
     EmptyScopeIn,
     NoFunctionalRequirements,
@@ -43,6 +45,11 @@ impl std::fmt::Display for ValidationError {
             ValidationError::EmptyVision => {
                 f.write_str("vision section is empty — describe what problem this solves")
             }
+            ValidationError::TodoPlaceholder(field) => write!(
+                f,
+                "field '{}' contains only a TODO placeholder — LLM did not produce real content",
+                field
+            ),
             ValidationError::NoSuccessCriteria => {
                 f.write_str("no success criteria — add at least one measurable criterion")
             }
@@ -166,6 +173,18 @@ pub fn validate_prd(prd: &Prd) -> ValidationResult {
 
     if prd.vision.trim().is_empty() {
         errors.push(ValidationError::EmptyVision);
+    } else if prd.vision.trim_start().starts_with("TODO:") {
+        errors.push(ValidationError::TodoPlaceholder("vision".to_owned()));
+    }
+
+    // Check if all requirements are TODO-only placeholders.
+    let all_reqs_todo = !prd.requirements.is_empty()
+        && prd
+            .requirements
+            .iter()
+            .all(|r| r.description.trim_start().starts_with("TODO:"));
+    if all_reqs_todo {
+        errors.push(ValidationError::TodoPlaceholder("requirements".to_owned()));
     }
 
     if prd.success_criteria.is_empty() {
@@ -546,5 +565,67 @@ mod tests {
         assert!(!is_structured_id("REQ-"));
         assert!(!is_structured_id("FEAT-001"));
         assert!(!is_structured_id(""));
+    }
+
+    // --- TODO placeholder detection (CRIT-8) ---
+
+    #[test]
+    fn test_todo_vision_is_error() {
+        let mut prd = complete_prd();
+        prd.vision = "TODO: describe the problem this solves.".to_owned();
+        let result = validate_prd(&prd);
+        assert!(!result.is_valid(), "TODO vision should block validation");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TodoPlaceholder(f) if f == "vision")),
+            "expected TodoPlaceholder(vision) error"
+        );
+    }
+
+    #[test]
+    fn test_all_todo_requirements_is_error() {
+        let mut prd = complete_prd();
+        prd.requirements = vec![Requirement {
+            id: "REQ-001".to_owned(),
+            description: "TODO: describe the primary functional requirement.".to_owned(),
+            kind: RequirementKind::Functional,
+        }];
+        let result = validate_prd(&prd);
+        assert!(!result.is_valid(), "all-TODO requirements should block validation");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TodoPlaceholder(f) if f == "requirements")),
+            "expected TodoPlaceholder(requirements) error"
+        );
+    }
+
+    #[test]
+    fn test_partial_todo_requirements_not_blocked() {
+        // Only ALL-TODO requirements are blocked; mixed is OK.
+        let mut prd = complete_prd();
+        prd.requirements = vec![
+            Requirement {
+                id: "REQ-001".to_owned(),
+                description: "TODO: placeholder".to_owned(),
+                kind: RequirementKind::Functional,
+            },
+            Requirement {
+                id: "REQ-002".to_owned(),
+                description: "System must do the real thing".to_owned(),
+                kind: RequirementKind::Functional,
+            },
+        ];
+        let result = validate_prd(&prd);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TodoPlaceholder(f) if f == "requirements")),
+            "mixed requirements (some real) should not be blocked as TODO-only"
+        );
     }
 }

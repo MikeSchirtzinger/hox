@@ -68,6 +68,10 @@ mod inner {
         /// Classify args as Read or Write
         fn classify(args: &[&str]) -> OpKind {
             match args.first().copied() {
+                // Help and version flags never mutate state — always Read.
+                Some("help" | "--help" | "--version") => OpKind::Read,
+                // Any subcommand invoked with --help is also a read.
+                _ if args.iter().any(|&a| a == "--help" || a == "--version") => OpKind::Read,
                 Some("log" | "op" | "bookmark" | "status" | "show" | "evolog") => {
                     // "bookmark list" is read, "bookmark create/set/delete" is write
                     if args.first() == Some(&"bookmark") {
@@ -100,13 +104,8 @@ mod inner {
         fn get_repo(&self) -> std::result::Result<Arc<ReadonlyRepo>, String> {
             let mut guard = self.handle.lock().map_err(|e| format!("lock poisoned: {e}"))?;
 
-            // If cached, check freshness by comparing op_id
-            if let Some(ref handle) = *guard {
-                // Return cached repo — caller invalidates on writes
-                return Ok(Arc::clone(&handle.repo));
-            }
-
-            // Load workspace from scratch
+            // Load a fresh workspace view to check the current op head.
+            // We need this even when cached so we can detect external writes.
             let config = StackedConfig::empty();
             let settings = UserSettings::from_config(config)
                 .map_err(|e| format!("UserSettings init: {e}"))?;
@@ -121,10 +120,21 @@ mod inner {
                 .load_at_head()
                 .map_err(|e| format!("load_at_head: {e}"))?;
 
-            let op_id = repo.operation().id().hex();
+            let current_op_id = repo.operation().id().hex();
+
+            // If cached, compare op_id to detect external writes.
+            if let Some(ref handle) = *guard {
+                if handle.op_id == current_op_id {
+                    // Cache is still valid — repo unchanged since last load.
+                    return Ok(Arc::clone(&handle.repo));
+                }
+                // op_id changed — external write detected, fall through to update cache.
+            }
+
+            // Cache miss or stale — store the freshly loaded repo.
             *guard = Some(RepoHandle {
                 repo: Arc::clone(&repo),
-                op_id,
+                op_id: current_op_id,
             });
 
             Ok(repo)
@@ -335,6 +345,33 @@ mod inner {
             assert_eq!(JjLibExecutor::classify(&["status"]), OpKind::Read);
             assert_eq!(JjLibExecutor::classify(&["show"]), OpKind::Read);
             assert_eq!(JjLibExecutor::classify(&["evolog"]), OpKind::Read);
+        }
+
+        // --- W10: help/version probes must be classified as Read ---
+
+        #[test]
+        fn test_classify_help_probes_are_reads() {
+            // Bare help flag
+            assert_eq!(JjLibExecutor::classify(&["--help"]), OpKind::Read);
+            assert_eq!(JjLibExecutor::classify(&["help"]), OpKind::Read);
+            assert_eq!(JjLibExecutor::classify(&["--version"]), OpKind::Read);
+            // Subcommand with --help (e.g. "describe --help" used by detect_fork_features)
+            assert_eq!(
+                JjLibExecutor::classify(&["describe", "--help"]),
+                OpKind::Read
+            );
+            assert_eq!(
+                JjLibExecutor::classify(&["log", "--help"]),
+                OpKind::Read
+            );
+            assert_eq!(
+                JjLibExecutor::classify(&["new", "--help"]),
+                OpKind::Read
+            );
+            assert_eq!(
+                JjLibExecutor::classify(&["bookmark", "create", "--help"]),
+                OpKind::Read
+            );
         }
 
         #[test]

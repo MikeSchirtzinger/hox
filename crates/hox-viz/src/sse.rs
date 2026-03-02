@@ -58,18 +58,27 @@ pub async fn sse_handler(
                     *app.current_state.write().await = Some(viz_state.clone());
                     last_state = Some(viz_state);
                 }
-                Err(_) => {
-                    // Send empty state on error
-                    let empty = VizState {
-                        session: Default::default(),
-                        metrics: Default::default(),
-                        nodes: vec![],
-                        links: vec![],
-                        phases: vec![],
-                        oplog: vec![],
-                    };
-                    if let Ok(json) = serde_json::to_string(&empty) {
-                        yield Ok(Event::default().event("state").data(json));
+                Err(e) => {
+                    eprintln!("[hox-viz] fetch_state error: {e}");
+                    // On error, preserve last known state rather than sending empty
+                    if let Some(ref cached) = last_state {
+                        if let Ok(json) = serde_json::to_string(cached) {
+                            yield Ok(Event::default().event("state").data(json));
+                        }
+                    }
+                    // If no previous state, send empty so frontend at least connects
+                    else {
+                        let empty = VizState {
+                            session: Default::default(),
+                            metrics: Default::default(),
+                            nodes: vec![],
+                            links: vec![],
+                            phases: vec![],
+                            oplog: vec![],
+                        };
+                        if let Ok(json) = serde_json::to_string(&empty) {
+                            yield Ok(Event::default().event("state").data(json));
+                        }
                     }
                 }
             }

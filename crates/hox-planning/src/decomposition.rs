@@ -15,24 +15,8 @@
 //!    `shared_contracts` must be referenced by at least two slices via
 //!    `used_by`.
 
-use async_trait::async_trait;
-
 use crate::hox_prd::Prd;
-
-// ---------------------------------------------------------------------------
-// LlmClient trait (defined locally — merged with importer when that lands)
-// ---------------------------------------------------------------------------
-
-/// Minimal async interface for a single-turn LLM completion.
-///
-/// Implement this to bridge the decomposer to any model backend.
-/// Tests use [`MockLlmClient`].
-#[async_trait]
-pub trait LlmClient: Send + Sync {
-    /// Run a single completion and return the model's text output, or an error
-    /// message string on failure.
-    async fn complete(&self, system: &str, user: &str) -> Result<String, String>;
-}
+pub use crate::llm::LlmClient;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,25 +113,29 @@ impl std::error::Error for DecompositionError {}
 ///
 /// # Errors
 ///
-/// Returns `Err(String)` when:
+/// Returns `Err` when:
 /// - The LLM call fails.
 /// - The response cannot be parsed into a valid `DecompositionResult`.
 /// - Post-parse validation fails (missing coverage, cycles, orphan contracts).
-pub async fn decompose(prd: &Prd, llm: &dyn LlmClient) -> Result<DecompositionResult, String> {
+pub async fn decompose(prd: &Prd, llm: &dyn LlmClient) -> hox_core::Result<DecompositionResult> {
     let system = DECOMPOSITION_SYSTEM_PROMPT;
     let user = build_user_prompt(prd);
 
-    let raw = llm
-        .complete(system, &user)
-        .await
-        .map_err(|e| format!("LLM call failed: {}", e))?;
+    let raw = llm.complete(system, &user).await.map_err(|e| {
+        hox_core::HoxError::Agent(format!("LLM call failed: {}", e))
+    })?;
 
-    let result = parse_response(&raw).map_err(|e| format!("parse failed: {}", e))?;
+    let result = parse_response(&raw).map_err(|e| {
+        hox_core::HoxError::Agent(format!("parse failed: {}", e))
+    })?;
 
     let errors = validate_decomposition(prd, &result);
     if !errors.is_empty() {
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(format!("validation failed: {}", msgs.join("; ")));
+        return Err(hox_core::HoxError::ValidationFailed(format!(
+            "validation failed: {}",
+            msgs.join("; ")
+        )));
     }
 
     Ok(result)
@@ -444,6 +432,7 @@ fn parse_list(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use crate::hox_prd::{Prd, Requirement, RequirementKind};
 
     // -----------------------------------------------------------------------
@@ -464,7 +453,7 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for MockLlmClient {
-        async fn complete(&self, _system: &str, _user: &str) -> Result<String, String> {
+        async fn complete(&self, _system: &str, _user: &str) -> hox_core::Result<String> {
             Ok(self.response.clone())
         }
     }
@@ -473,8 +462,8 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FailingLlmClient {
-        async fn complete(&self, _system: &str, _user: &str) -> Result<String, String> {
-            Err("network timeout".to_owned())
+        async fn complete(&self, _system: &str, _user: &str) -> hox_core::Result<String> {
+            Err(hox_core::HoxError::Agent("network timeout".to_owned()))
         }
     }
 
@@ -551,7 +540,7 @@ NONE
         let prd = make_prd(&["REQ-001"]);
         let result = decompose(&prd, &FailingLlmClient).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("LLM call failed"));
+        assert!(result.unwrap_err().to_string().contains("LLM call failed"));
     }
 
     #[tokio::test]
@@ -773,7 +762,7 @@ DEPENDS: API Layer AFTER Storage Layer
 
     #[async_trait]
     impl LlmClient for CapturingLlmClient {
-        async fn complete(&self, _system: &str, user: &str) -> Result<String, String> {
+        async fn complete(&self, _system: &str, user: &str) -> hox_core::Result<String> {
             *self.captured_user.lock().unwrap() = user.to_owned();
             Ok(self.response.clone())
         }

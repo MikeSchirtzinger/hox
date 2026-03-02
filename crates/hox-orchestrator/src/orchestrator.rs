@@ -14,7 +14,8 @@ use hox_core::{
 };
 use hox_jj::{
     AbsorbResult, BookmarkManager, DagOperations, JjCommand, JjExecutor, MetadataManager,
-    OpLogEvent, OpLogWatcher, ParallelizeResult, RevsetQueries, SplitResult,
+    OpLogEvent, OpLogWatcher, ParallelizeResult, RepoMode, RevsetQueries, SplitResult,
+    detect_repo_mode,
 };
 
 use crate::loop_engine::LoopEngine;
@@ -121,6 +122,11 @@ pub struct Orchestrator<E: JjExecutor> {
     /// creation instead of the `WorkspaceManager`. Falls back to `WorkspaceManager`
     /// when `None`.
     isolation: Option<Box<dyn IsolationBackend>>,
+    /// Names of agents whose workspaces were created via the isolation backend.
+    ///
+    /// Populated in `spawn_agent` when the isolation path is taken.
+    /// Consumed in `cleanup_agent_isolation` and `integrate` to call `isolation.destroy`.
+    isolated_agent_names: HashSet<String>,
 }
 
 impl Orchestrator<JjCommand> {
@@ -150,6 +156,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             active_agent_change_ids: HashSet::new(),
             fork_features: false,
             isolation: None,
+            isolated_agent_names: HashSet::new(),
         })
     }
 
@@ -265,6 +272,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         // fall back to the existing `WorkspaceManager` code path.
         let ws_executor: JjCommand = if let Some(ref isolation) = self.isolation {
             let env = isolation.create(&agent_name).await?;
+            self.isolated_agent_names.insert(agent_name.clone());
             JjCommand::new(&env.workspace_path)
         } else {
             self.workspace_manager.create_workspace(&agent_name).await?;
@@ -335,6 +343,44 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// set.  Once all agents have checked in the DAG restructuring gate opens.
     pub fn complete_agent_change(&mut self, change_id: &str) {
         self.active_agent_change_ids.remove(change_id);
+    }
+
+    /// Destroy the isolated workspace for a single agent.
+    ///
+    /// Called after an agent completes its work. Non-fatal: errors are logged
+    /// as warnings so that a failed cleanup never blocks orchestration.
+    pub async fn cleanup_agent_isolation(&mut self, agent_name: &str) {
+        if !self.isolated_agent_names.contains(agent_name) {
+            return;
+        }
+        if let Some(ref isolation) = self.isolation {
+            match isolation.destroy(agent_name).await {
+                Ok(()) => {
+                    debug!("Destroyed isolated workspace for agent {}", agent_name);
+                    self.isolated_agent_names.remove(agent_name);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to destroy isolated workspace for agent {} (non-fatal): {}",
+                        agent_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Destroy all remaining isolated workspaces.
+    ///
+    /// Called from `integrate()` to ensure no workspaces linger after
+    /// orchestration completes regardless of how agents finished.
+    async fn cleanup_all_isolation(&mut self) {
+        if self.isolation.is_none() || self.isolated_agent_names.is_empty() {
+            return;
+        }
+        let names: Vec<String> = self.isolated_agent_names.iter().cloned().collect();
+        for name in names {
+            self.cleanup_agent_isolation(&name).await;
+        }
     }
 
     /// Tier 1: Return the set of change IDs currently held by active agents.
@@ -462,8 +508,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Stale bookmark cleanup is also attempted. All failures are non-fatal —
     /// maintenance errors are logged as warnings and never crash orchestration.
     async fn run_phase_maintenance(&self) -> Result<()> {
-        let is_colocated = self.config.repo_root.join(".jj").is_dir()
-            && self.config.repo_root.join(".git").exists();
+        let is_colocated = detect_repo_mode(&self.config.repo_root) == RepoMode::Colocated;
 
         if is_colocated {
             info!("Running colocated maintenance (jj util gc)");
@@ -577,6 +622,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         }
 
         self.state = OrchestratorState::Validating;
+
+        // Destroy any isolated workspaces that were not already cleaned up
+        // after individual agent completion.
+        self.cleanup_all_isolation().await;
+
         Ok(())
     }
 
@@ -1293,6 +1343,7 @@ mod tests {
             active_agent_change_ids: HashSet::new(),
             fork_features: false,
             isolation: None,
+            isolated_agent_names: HashSet::new(),
         }
     }
 

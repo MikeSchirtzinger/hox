@@ -22,7 +22,6 @@ use hox_core::{HoxError, Result};
 /// Sentinel prefix for all hox PRD change descriptions.
 pub const PRD_SENTINEL: &str = "hox:prd:v1";
 
-const SENTINEL_PREFIX: &str = "hox:prd:";
 const SENTINEL_SEP: &str = " \u{2014} "; // " — "
 
 // ---------------------------------------------------------------------------
@@ -102,9 +101,13 @@ impl Prd {
         }
     }
 
-    /// Returns `true` when `description` begins with the `hox:prd:` sentinel.
+    /// Returns `true` when `description` begins with the `hox:prd:v1` sentinel.
+    ///
+    /// This checks for the exact `PRD_SENTINEL` constant — future format versions
+    /// would return `false` here until explicit support is added, preventing
+    /// silent misparses of `hox:prd:v2` or similar.
     pub fn is_prd(description: &str) -> bool {
-        description.starts_with(SENTINEL_PREFIX)
+        description.starts_with(PRD_SENTINEL)
     }
 
     /// Serialize to `hox:prd:v1` markdown format.
@@ -658,7 +661,8 @@ Enable external services to subscribe to Brevity events via HTTP webhooks.
     #[test]
     fn test_is_prd_true() {
         assert!(Prd::is_prd("hox:prd:v1 — Something"));
-        assert!(Prd::is_prd("hox:prd:v2 — Future version"));
+        // The sentinel must be the exact v1 string; unknown versions are rejected.
+        assert!(!Prd::is_prd("hox:prd:v2 — Future version"));
     }
 
     #[test]
@@ -666,6 +670,7 @@ Enable external services to subscribe to Brevity events via HTTP webhooks.
         assert!(!Prd::is_prd("This is a normal commit message"));
         assert!(!Prd::is_prd(""));
         assert!(!Prd::is_prd("HOX:PRD:V1 — uppercase"));
+        assert!(!Prd::is_prd("hox:prd: — no version"));
     }
 
     #[test]
