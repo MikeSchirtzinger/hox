@@ -18,7 +18,10 @@ use hox_orchestrator::{
     create_initial_state, load_state, run_external_iteration, save_state, ExternalIterationConfig,
     Orchestrator, OrchestratorConfig, PhaseManager,
 };
-use hox_planning::{cli_tool_prd, example_prd, PrdDecomposer, ProjectRequirementsDocument};
+use hox_planning::{
+    cli_tool_prd, example_prd, validate_markdown, LlmClient, PlanningAgent, PrdDecomposer,
+    ProjectRequirementsDocument,
+};
 use hox_validation::{ByzantineConsensus, ConsensusConfig, Validator, ValidatorConfig};
 use std::path::PathBuf;
 use tracing::{info, Level};
@@ -60,7 +63,7 @@ enum Commands {
     /// Run orchestration on a plan
     Orchestrate {
         /// Plan description or file
-        plan: String,
+        plan: Option<String>,
 
         /// Number of orchestrators to spawn
         #[arg(short = 'n', long, default_value = "1")]
@@ -73,7 +76,25 @@ enum Commands {
         /// Enable hierarchical delegation (spawn child orchestrators for epics)
         #[arg(long)]
         delegate: bool,
+
+        /// Execute an existing PRD change (change ID or file path)
+        #[arg(long)]
+        from_plan: Option<String>,
+
+        /// Show phases without executing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Isolation backend to use
+        #[arg(long, default_value = "filesystem")]
+        backend: String,
     },
+
+    /// Run planning agent to produce a PRD
+    Plan(PlanArgs),
+
+    /// Validate a PRD for completeness
+    PlanValidate(PlanValidateArgs),
 
     /// Show orchestration status
     Status,
@@ -409,6 +430,49 @@ enum PatternCommands {
     Builtin,
 }
 
+/// Arguments for `hox plan`
+#[derive(clap::Args)]
+struct PlanArgs {
+    /// Description of what to plan
+    #[arg(long)]
+    description: Option<String>,
+
+    /// Auto-generate PRD from description (no interactive discovery)
+    #[arg(long)]
+    auto: bool,
+
+    /// Import PRD from existing markdown file
+    #[arg(long)]
+    from_file: Option<PathBuf>,
+
+    /// Write PRD to output file
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Model to use for planning
+    #[arg(long, default_value = "opus")]
+    model: String,
+}
+
+/// Arguments for `hox plan-validate`
+#[derive(clap::Args)]
+struct PlanValidateArgs {
+    /// Path to PRD markdown file to validate
+    path: PathBuf,
+}
+
+/// Stub LLM client that returns an error — real integration wired separately.
+struct StubLlmClient;
+
+#[async_trait::async_trait]
+impl LlmClient for StubLlmClient {
+    async fn complete(&self, _prompt: &str) -> hox_core::Result<String> {
+        Err(hox_core::HoxError::Other(
+            "LLM not configured: set ANTHROPIC_API_KEY and wire up a real LLM client".to_owned(),
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -437,7 +501,12 @@ async fn main() -> Result<()> {
             orchestrators,
             max_agents,
             delegate,
-        } => cmd_orchestrate(plan, orchestrators, max_agents, delegate).await,
+            from_plan,
+            dry_run,
+            backend,
+        } => cmd_orchestrate(plan, orchestrators, max_agents, delegate, from_plan, dry_run, backend).await,
+        Commands::Plan(args) => cmd_plan(args).await,
+        Commands::PlanValidate(args) => cmd_plan_validate(args).await,
         Commands::Status => cmd_status().await,
         Commands::Patterns { action } => cmd_patterns(action).await,
         Commands::Validate { change, validators } => cmd_validate(change, validators).await,
@@ -609,12 +678,45 @@ async fn cmd_init(
 }
 
 async fn cmd_orchestrate(
-    plan: String,
+    plan: Option<String>,
     orchestrator_count: usize,
     max_agents: usize,
     delegate: bool,
+    from_plan: Option<String>,
+    dry_run: bool,
+    backend: String,
 ) -> Result<()> {
-    info!("Starting orchestration: {}", plan);
+    // Determine plan source
+    let plan_description = match (&plan, &from_plan) {
+        (_, Some(plan_ref)) => {
+            info!("Loading plan from: {}", plan_ref);
+            format!("plan:{}", plan_ref)
+        }
+        (Some(p), None) => p.clone(),
+        (None, None) => {
+            anyhow::bail!(
+                "Provide a plan description or use --from-plan <change-id-or-file>. \
+                 Use --dry-run to preview phases without executing."
+            );
+        }
+    };
+
+    info!("Starting orchestration: {}", plan_description);
+
+    // In dry-run mode print phases and exit without touching JJ
+    if dry_run {
+        let phases = PhaseManager::standard_feature_phases(&plan_description);
+        println!("Dry-run mode — phases that would execute (backend: {}):", backend);
+        for (i, phase) in phases.phases().iter().enumerate() {
+            println!("  Phase {}: {}", i + 1, phase.name);
+        }
+        if let Some(plan_ref) = &from_plan {
+            println!("\nPlan source: {}", plan_ref);
+        }
+        println!("Backend: {}", backend);
+        println!("\nRe-run without --dry-run to execute.");
+        return Ok(());
+    }
 
     let jj = JjCommand::detect()
         .await
@@ -632,7 +734,7 @@ async fn cmd_orchestrate(
         let mut orchestrator = Orchestrator::with_executor(config, jj.clone()).await?;
 
         // Setup standard phases
-        let phases = PhaseManager::standard_feature_phases(&plan);
+        let phases = PhaseManager::standard_feature_phases(&plan_description);
         for phase in phases.phases() {
             orchestrator.add_phase(phase.clone());
         }
@@ -655,6 +757,88 @@ async fn cmd_orchestrate(
     );
     if !delegate {
         println!("Use 'hox status' to check progress");
+    }
+
+    Ok(())
+}
+
+async fn cmd_plan(args: PlanArgs) -> Result<()> {
+    let llm = StubLlmClient;
+
+    let mut result = match (&args.from_file, args.auto, &args.description) {
+        // --from-file: import existing PRD markdown
+        (Some(path), _, _) => {
+            info!("Importing PRD from file: {:?}", path);
+            println!("Importing PRD from {:?}...", path);
+            PlanningAgent::from_file(path, Some(&llm))
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        }
+
+        // --auto + --description: single-shot LLM generation
+        (None, true, Some(description)) => {
+            info!("Auto-generating PRD for: {}", description);
+            println!("Auto-generating PRD for: {}", description);
+            println!("Note: LLM not configured — returning stub error.");
+            PlanningAgent::auto_plan(description, &llm)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        }
+
+        // --auto without --description
+        (None, true, None) => {
+            anyhow::bail!("--auto requires --description");
+        }
+
+        // No mode specified: print help
+        _ => {
+            println!("hox plan — three modes:");
+            println!();
+            println!("  Auto (one-shot LLM generation):");
+            println!("    hox plan --auto --description \"My feature\" [--output prd.md]");
+            println!();
+            println!("  From file (import existing markdown):");
+            println!("    hox plan --from-file existing.md [--output prd.md]");
+            println!();
+            println!("  Interactive (guided discovery — not yet wired in CLI):");
+            println!("    Use PlanningAgent::interactive() directly from code.");
+            return Ok(());
+        }
+    };
+
+    // Print validation results
+    let validation = hox_planning::validate_prd(&result.prd);
+    if !validation.is_valid() || !validation.warnings.is_empty() {
+        println!();
+        print!("{}", validation.format_report());
+    }
+
+    // Write output file if requested
+    if let Some(output_path) = &args.output {
+        PlanningAgent::write_result(&mut result, None::<&hox_jj::JjCommand>, Some(output_path))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        println!("PRD written to {:?}", output_path);
+    }
+
+    println!("PRD title: {}", result.prd.title);
+    println!("Trace steps: {}", result.trace.steps.len());
+
+    Ok(())
+}
+
+async fn cmd_plan_validate(args: PlanValidateArgs) -> Result<()> {
+    info!("Validating PRD at {:?}", args.path);
+
+    let content = tokio::fs::read_to_string(&args.path)
+        .await
+        .with_context(|| format!("Failed to read {:?}", args.path))?;
+
+    let result = validate_markdown(&content);
+    print!("{}", result.format_report());
+
+    if !result.is_valid() {
+        std::process::exit(1);
     }
 
     Ok(())
