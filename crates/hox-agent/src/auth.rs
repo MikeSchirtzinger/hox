@@ -33,6 +33,34 @@ pub fn get_auth_token() -> Result<String> {
     ))
 }
 
+/// Get authentication token for OpenAI-compatible APIs.
+///
+/// Priority:
+/// 1. `OPENAI_API_KEY`   — standard OpenAI or any compatible endpoint
+/// 2. `OPENROUTER_API_KEY` — OpenRouter aggregator
+///
+/// Returns `Err` only when **neither** variable is set.  Ollama and other
+/// unauthenticated endpoints do not need a key — callers may handle the
+/// `Err` by defaulting to an empty string.
+pub fn get_openai_auth_token() -> Result<String> {
+    if let Ok(key) = env::var("OPENAI_API_KEY") {
+        tracing::info!("Using OPENAI_API_KEY");
+        return Ok(key);
+    }
+
+    if let Ok(key) = env::var("OPENROUTER_API_KEY") {
+        tracing::info!("Using OPENROUTER_API_KEY");
+        return Ok(key);
+    }
+
+    Err(HoxError::Auth(
+        "No OpenAI auth found. Set either:\n\
+         - OPENAI_API_KEY=sk-...       (for OpenAI or compatible APIs)\n\
+         - OPENROUTER_API_KEY=sk-or-... (for OpenRouter)"
+            .to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +136,48 @@ mod tests {
             ],
             || {
                 let result = get_auth_token();
+                assert!(result.is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn test_openai_key_priority() {
+        with_env_vars(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai-key")),
+                ("OPENROUTER_API_KEY", Some("sk-or-key")),
+            ],
+            || {
+                let token = super::get_openai_auth_token().unwrap();
+                assert_eq!(token, "sk-openai-key");
+            },
+        );
+    }
+
+    #[test]
+    fn test_openrouter_fallback() {
+        with_env_vars(
+            &[
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", Some("sk-or-key")),
+            ],
+            || {
+                let token = super::get_openai_auth_token().unwrap();
+                assert_eq!(token, "sk-or-key");
+            },
+        );
+    }
+
+    #[test]
+    fn test_no_openai_auth_returns_err() {
+        with_env_vars(
+            &[
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+            ],
+            || {
+                let result = super::get_openai_auth_token();
                 assert!(result.is_err());
             },
         );

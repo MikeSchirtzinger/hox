@@ -15,8 +15,8 @@ use crate::prompt::{build_iteration_prompt, parse_context_update};
 use crate::recovery::RecoveryManager;
 use crate::workspace::WorkspaceManager;
 use hox_agent::{
-    execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise, LoopConfig,
-    LoopResult, StopReason, Usage,
+    dispatch_agent_with_config, execute_file_operations, BackpressureResult, CompletionPromise,
+    LoopConfig, LoopResult, StopReason, Usage,
 };
 use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
 use hox_jj::{JjExecutor, MetadataManager};
@@ -170,12 +170,15 @@ impl<E: JjExecutor + Clone + 'static> LoopEngine<E> {
 
             debug!("Prompt length: {} chars", prompt.len());
 
-            // Spawn fresh agent
-            let result = spawn_agent(
+            // Spawn fresh agent via configured backend
+            let result = dispatch_agent_with_config(
                 &prompt,
                 iteration,
                 self.config.model,
                 self.config.max_tokens,
+                &self.config.backend,
+                &self.workspace_path,
+                self.config.agent_config.as_ref(),
             )
             .await?;
 

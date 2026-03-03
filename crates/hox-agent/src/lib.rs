@@ -20,7 +20,10 @@ pub mod artifact_manager;
 mod auth;
 mod circuit_breaker;
 mod client;
+pub mod claude_cli;
+pub mod executor;
 mod file_executor;
+pub mod openai_client;
 mod promise;
 mod types;
 
@@ -28,13 +31,15 @@ pub use artifact_manager::{
     artifact_capture_instructions, capture_screenshot_cdp, ArtifactManager, ArtifactType,
     ValidationArtifact,
 };
-pub use auth::get_auth_token;
+pub use auth::{get_auth_token, get_openai_auth_token};
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
-pub use client::{spawn_agent, AgentClient};
+pub use client::{dispatch_agent, dispatch_agent_with_config, spawn_agent, AgentClient};
+pub use executor::{build_executor, AgentExecutor, AnthropicExecutor, ClaudeCliExecutor};
 pub use file_executor::{
     execute_file_operations, execute_file_operations_with_config, execute_tools,
     file_operation_instructions, validate_path, validate_path_with_config, ExecutionResult,
     FileOperation,
 };
+pub use openai_client::OpenAiExecutor;
 pub use promise::CompletionPromise;
 pub use types::*;

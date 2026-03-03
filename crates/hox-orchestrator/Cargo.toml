@@ -12,6 +12,7 @@ hox-core = { workspace = true }
 hox-jj = { workspace = true }
 hox-agent = { workspace = true }
 hox-metrics = { workspace = true }
+hox-isolation = { path = "../hox-isolation" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

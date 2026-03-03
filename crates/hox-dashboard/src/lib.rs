@@ -42,15 +42,15 @@
 mod state;
 
 pub use state::{
-    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics, JjOpType, JjOplogEntry,
-    OrchestrationSession, PhaseProgress, PhaseStatus,
+    AgentNode, AgentStatus, DagChange, DagState, DashboardConfig, DashboardState, FileChange,
+    GlobalMetrics, JjOpType, JjOplogEntry, OrchestrationSession, PhaseProgress, PhaseStatus,
 };
 
 // Phase 1a: Error types
 mod error;
 
 pub use error::{DashboardError, Result};
-pub use jj_source::JjDataSource;
+pub use jj_source::{fetch_file_diff, JjDataSource};
 
 // Phase 1 modules (to be implemented by parallel agents)
 mod jj_source;

@@ -11,10 +11,13 @@
 use crate::backpressure::run_all_checks_with_fix;
 use crate::prompt::{build_iteration_prompt, parse_context_update};
 use hox_agent::{
-    execute_file_operations, spawn_agent, BackpressureResult, CompletionPromise,
+    dispatch_agent_with_config, execute_file_operations, BackpressureResult, CompletionPromise,
     ExternalLoopResult, ExternalLoopState, Model,
 };
-use hox_core::{BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task};
+use hox_core::AgentBackend;
+use hox_core::{
+    AgentConfig, BackpressureStatus, CheckStatusEntry, HandoffContext, HoxError, Result, Task,
+};
 use hox_jj::{JjExecutor, MetadataManager};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -39,6 +42,11 @@ pub struct ExternalIterationConfig<'a> {
     pub workspace_path: PathBuf,
     /// Whether to run backpressure checks
     pub run_backpressure: bool,
+    /// Agent execution backend (legacy — kept for backward compat)
+    pub backend: AgentBackend,
+    /// Fine-grained agent config.  When present, `agent_config.backend`
+    /// overrides `backend`.
+    pub agent_config: Option<AgentConfig>,
 }
 
 /// Run a single external iteration
@@ -84,8 +92,17 @@ pub async fn run_external_iteration<E: JjExecutor>(
     );
     debug!("Prompt length: {} chars", prompt.len());
 
-    // Spawn fresh agent
-    let result = spawn_agent(&prompt, config.iteration, config.model, config.max_tokens).await?;
+    // Spawn fresh agent via configured backend
+    let result = dispatch_agent_with_config(
+        &prompt,
+        config.iteration,
+        config.model,
+        config.max_tokens,
+        &config.backend,
+        &config.workspace_path,
+        config.agent_config.as_ref(),
+    )
+    .await?;
 
     info!(
         "Agent iteration {} complete ({} chars output)",

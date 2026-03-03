@@ -1,3 +1,45 @@
+// Agent lane colors — distinct cyberpunk palette cycling per agent lane
+export const AGENT_LANE_COLORS = [
+    '#00ffff',  // Cyan
+    '#ff00ff',  // Magenta
+    '#00ff88',  // Green
+    '#ff8800',  // Orange
+    '#8888ff',  // Periwinkle
+    '#ffff00',  // Yellow
+    '#ff0088',  // Hot pink
+    '#00ccff',  // Sky blue
+    '#ff4400',  // Red-orange
+    '#88ff00',  // Lime
+];
+
+/**
+ * Get a deterministic lane color for an agent by index or id.
+ * @param {number|string} agentIndexOrId
+ * @returns {string} hex color
+ */
+export function colorForAgentLane(agentIndexOrId) {
+    let idx;
+    if (typeof agentIndexOrId === 'number') {
+        idx = agentIndexOrId;
+    } else {
+        // Hash string to index
+        let h = 0;
+        for (let i = 0; i < agentIndexOrId.length; i++) {
+            h = (h * 31 + agentIndexOrId.charCodeAt(i)) >>> 0;
+        }
+        idx = h;
+    }
+    return AGENT_LANE_COLORS[idx % AGENT_LANE_COLORS.length];
+}
+
+// DAG-specific link colors
+export const DAG_LINK_COLORS = {
+    dag_parent:   null,          // per-agent lane color (computed at render time)
+    agent_branch: '#00ffff',     // Cyan
+    file_touch:   '#224444',     // Dark teal
+    merge_edge:   '#ff00ff',     // Magenta
+};
+
 // Status colors (cyberpunk palette)
 export const STATUS_COLORS = {
     running:   '#00ffff',  // Cyan

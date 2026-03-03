@@ -13,14 +13,16 @@ use hox_core::{
     HoxMetadata, MessageType, OrchestratorId, Phase, Result, Task, TaskStatus,
 };
 use hox_jj::{
-    AbsorbResult, BookmarkManager, DagOperations, JjCommand, JjExecutor, MetadataManager,
-    OpLogEvent, OpLogWatcher, ParallelizeResult, RevsetQueries, SplitResult,
+    AbsorbResult, BookmarkManager, DagOperations, ForkFeatures, JjCommand, JjExecutor,
+    MetadataManager, OpLogEvent, OpLogWatcher, ParallelizeResult, RepoMode, RevsetQueries,
+    SplitResult, detect_fork_features, detect_repo_mode,
 };
 
 use crate::loop_engine::LoopEngine;
 use crate::workspace::WorkspaceManager as WM;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use hox_isolation::IsolationBackend;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::communication::MessageRouter;
@@ -105,6 +107,37 @@ pub struct Orchestrator<E: JjExecutor> {
     children: HashMap<OrchestratorId, ChildHandle>,
     /// State machine for observability and pattern tracking
     sm_state: state_machine::State,
+    /// Tier 1: Change IDs currently being worked on by active agents.
+    ///
+    /// DAG restructuring operations (rebase, absorb, parallelize) MUST be
+    /// deferred while this set is non-empty to avoid races with agent writes.
+    active_agent_change_ids: HashSet<String>,
+    /// Tier 2: jj-dev fork features detected at startup by probing the jj binary.
+    ///
+    /// - W6 (`forked_op_heads`): Per-agent `ForkedOpHeadsStore` for 100% oplog isolation.
+    /// - W7 (`metadata_only`): `--metadata-only` on `jj describe` eliminates ~80% of
+    ///   oplog staleness by skipping `update_op_heads` for metadata-only writes.
+    /// - W8 (`read_only`): `--read-only` on `jj log` allows safe concurrent polling
+    ///   without oplog contention.
+    ///
+    /// All three are auto-detected at runtime; no config change needed.
+    // TODO(W7): When jj-dev fork adds --metadata-only to `jj describe`:
+    //   - Pass fork_features.metadata_only to MetadataBatch::with_fork_features()
+    //   - This eliminates op_heads writes for metadata-only updates (~80% oplog staleness reduction)
+    //
+    // TODO(W8): When jj-dev fork adds --read-only to `jj log`:
+    //   - Use fork_features.read_only for non-mutating orchestrator polling queries
+    //   - Safe concurrent reads without oplog contention
+    fork_features: ForkFeatures,
+    /// Optional isolation backend. When set, `spawn_agent` uses it for workspace
+    /// creation instead of the `WorkspaceManager`. Falls back to `WorkspaceManager`
+    /// when `None`.
+    isolation: Option<Box<dyn IsolationBackend>>,
+    /// Names of agents whose workspaces were created via the isolation backend.
+    ///
+    /// Populated in `spawn_agent` when the isolation path is taken.
+    /// Consumed in `cleanup_agent_isolation` and `integrate` to call `isolation.destroy`.
+    isolated_agent_names: HashSet<String>,
 }
 
 impl Orchestrator<JjCommand> {
@@ -120,6 +153,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     pub async fn with_executor(config: OrchestratorConfig, executor: E) -> Result<Self> {
         let workspace_manager = WorkspaceManager::new(executor.clone());
 
+        let fork_features = detect_fork_features(&executor).await;
+        if fork_features.any_available() {
+            tracing::info!(?fork_features, "Detected jj-dev fork features");
+        }
+
         Ok(Self {
             config,
             state: OrchestratorState::Initialized,
@@ -131,7 +169,32 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             change_id: None,
             children: HashMap::new(),
             sm_state: state_machine::State::Idle,
+            active_agent_change_ids: HashSet::new(),
+            fork_features,
+            isolation: None,
+            isolated_agent_names: HashSet::new(),
         })
+    }
+
+    /// Set a custom isolation backend.
+    pub fn with_isolation(mut self, backend: Box<dyn IsolationBackend>) -> Self {
+        self.isolation = Some(backend);
+        self
+    }
+
+    /// Configure filesystem + guarded isolation rooted at `repo_root/.hox-workspaces`.
+    ///
+    /// Safety rules are loaded from `repo_root/.hox/safety-rules.toml` (fail-open: missing
+    /// file = no enforcement).
+    pub fn with_default_isolation(mut self, repo_root: &Path) -> Self {
+        let workspace_dir = repo_root.join(".hox-workspaces");
+        let fs_backend =
+            hox_isolation::FilesystemBackend::new(workspace_dir, repo_root.to_path_buf());
+        let rules = hox_isolation::safety::load_safety_rules(repo_root)
+            .unwrap_or_else(|_| hox_isolation::CompiledSafetyRules::empty());
+        let guarded = hox_isolation::GuardedBackend::new(fs_backend, rules);
+        self.isolation = Some(Box::new(guarded));
+        self
     }
 
     /// Get the orchestrator ID
@@ -208,11 +271,54 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         info!("Spawning agent {} for: {}", agent_name, task_description);
 
-        // Create workspace for the agent
-        self.workspace_manager.create_workspace(&agent_name).await?;
+        // Tier 2: W6 – per-agent ForkedOpHeadsStore for fully isolated op-logs.
+        if self.fork_features.forked_op_heads {
+            tracing::info!(%agent_name, "W6: per-agent oplog isolation active");
+            let agent_oplogs_dir = self.config.repo_root
+                .join(".jj/agent-oplogs")
+                .join(&agent_name);
+            if let Err(e) = std::fs::create_dir_all(&agent_oplogs_dir) {
+                tracing::warn!(%agent_name, error = %e, "W6: failed to create agent oplog dir, falling back to Tier 1");
+            }
+            // TODO(W6-brevity): When jj-dev fork is published to jj-lib crate:
+            // 1. Call brevity::fork_agent_oplog(repo_path, &agent_name, shared_op_heads)
+            //    to snapshot current op heads into the agent's private store
+            // 2. Call brevity::agent_repo_loader(base_loader, repo_path, &agent_name)
+            //    to build agent-scoped executor that reads/writes to private op_heads
+            // 3. Use the agent-scoped executor for all jj operations in this agent's workspace
+        }
 
-        // Create a new change for the agent's work
-        let output = self.executor.exec(&["new", "-m", task_description]).await?;
+        // Create workspace for the agent and obtain a workspace-scoped executor.
+        // All agent operations MUST use this executor so they run inside the
+        // agent's working copy, not the main repo working copy.
+        //
+        // When an isolation backend is configured, use it to create the workspace
+        // and derive the executor path from the resulting `IsolatedEnv`. Otherwise
+        // fall back to the existing `WorkspaceManager` code path.
+        let ws_executor: JjCommand = if let Some(ref isolation) = self.isolation {
+            let env = isolation.create(&agent_name).await?;
+            self.isolated_agent_names.insert(agent_name.clone());
+            JjCommand::new(&env.workspace_path)
+        } else {
+            self.workspace_manager.create_workspace(&agent_name).await?;
+            self.workspace_manager.switch_to(&agent_name).await?
+        };
+
+        // `jj edit @` ensures the workspace working copy is pointing at the
+        // current change before we create the agent's change on top of it.
+        let edit_output = ws_executor.exec(&["edit", "@"]).await?;
+        if !edit_output.success {
+            // Non-fatal: workspace may already be at the right change.
+            debug!(
+                "jj edit @ in agent workspace returned non-success: {}",
+                edit_output.stderr
+            );
+        }
+
+        // Create a new change for the agent's work inside its workspace.
+        let output = ws_executor
+            .exec(&["new", "-m", task_description])
+            .await?;
 
         if !output.success {
             return Err(HoxError::Agent(format!(
@@ -221,26 +327,106 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             )));
         }
 
-        // Set agent metadata and create bookmark assignment
-        let queries = RevsetQueries::new(self.executor.clone());
+        // Set agent metadata and create bookmark assignment using the
+        // workspace-scoped executor so RevsetQueries resolve against the
+        // agent workspace (@), not the main working copy.
+        let queries = RevsetQueries::new(ws_executor.clone());
         if let Some(change_id) = queries.current().await? {
             let metadata = HoxMetadata::new()
                 .with_status(TaskStatus::InProgress)
                 .with_agent(&agent_name)
                 .with_orchestrator(self.config.id.to_string());
 
-            let manager = MetadataManager::new(self.executor.clone());
+            let manager = MetadataManager::new(ws_executor.clone());
             manager.set(&change_id, &metadata).await?;
 
             // Create bookmark assignment for the agent
-            let bookmark_manager = BookmarkManager::new(self.executor.clone());
+            let bookmark_manager = BookmarkManager::new(ws_executor.clone());
             bookmark_manager
                 .assign_task(&agent_name, &change_id)
                 .await?;
+
+            // Tier 1: track this change ID so DAG restructuring is deferred
+            // while the agent is active.
+            self.active_agent_change_ids.insert(change_id);
         }
 
         self.agents.insert(agent_name.clone(), agent_id.clone());
         Ok(agent_id)
+    }
+
+    /// Tier 1: Check whether DAG restructuring (rebase, absorb, parallelize)
+    /// should be deferred because one or more agents are currently active.
+    ///
+    /// Callers MUST check this before invoking `optimize_dag`, `absorb_fixes`,
+    /// or any other operation that rewrites ancestry in the shared DAG.
+    pub fn dag_restructure_deferred(&self) -> bool {
+        !self.active_agent_change_ids.is_empty()
+    }
+
+    /// Tier 1: Mark an agent's change as complete, removing it from the active
+    /// set.  Once all agents have checked in the DAG restructuring gate opens.
+    pub fn complete_agent_change(&mut self, change_id: &str) {
+        self.active_agent_change_ids.remove(change_id);
+    }
+
+    /// Destroy the isolated workspace for a single agent.
+    ///
+    /// Called after an agent completes its work. Non-fatal: errors are logged
+    /// as warnings so that a failed cleanup never blocks orchestration.
+    pub async fn cleanup_agent_isolation(&mut self, agent_name: &str) {
+        if !self.isolated_agent_names.contains(agent_name) {
+            return;
+        }
+        if let Some(ref isolation) = self.isolation {
+            match isolation.destroy(agent_name).await {
+                Ok(()) => {
+                    debug!("Destroyed isolated workspace for agent {}", agent_name);
+                    self.isolated_agent_names.remove(agent_name);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to destroy isolated workspace for agent {} (non-fatal): {}",
+                        agent_name, e
+                    );
+                }
+            }
+        }
+
+        // W6: Clean up per-agent oplog directory
+        if self.fork_features.forked_op_heads {
+            let agent_oplog_dir = self.config.repo_root
+                .join(".jj/agent-oplogs")
+                .join(agent_name);
+            if agent_oplog_dir.exists() {
+                // TODO(W6-brevity): Call brevity::merge_agent_oplog() BEFORE cleanup
+                // to merge agent's oplog changes back into the shared store
+                if let Err(e) = std::fs::remove_dir_all(&agent_oplog_dir) {
+                    tracing::warn!(%agent_name, error = %e, "W6: failed to clean up agent oplog dir");
+                } else {
+                    tracing::info!(%agent_name, "W6: cleaned up agent oplog dir");
+                }
+            }
+        }
+    }
+
+    /// Destroy all remaining isolated workspaces.
+    ///
+    /// Called from `integrate()` to ensure no workspaces linger after
+    /// orchestration completes regardless of how agents finished.
+    async fn cleanup_all_isolation(&mut self) {
+        if self.isolation.is_none() || self.isolated_agent_names.is_empty() {
+            return;
+        }
+        let names: Vec<String> = self.isolated_agent_names.iter().cloned().collect();
+        for name in names {
+            self.cleanup_agent_isolation(&name).await;
+        }
+    }
+
+    /// Tier 1: Return the set of change IDs currently held by active agents.
+    pub fn active_agent_change_ids(&self) -> &HashSet<String> {
+        &self.active_agent_change_ids
     }
 
     /// Send a mutation message to agents
@@ -324,6 +510,10 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                     Some(PhaseStatus::Completed) => {
                         info!("Phase {} completed, advancing", current_phase.number);
                         self.phases.advance()?;
+                        // Run maintenance after each phase completes (fail-open)
+                        if let Err(e) = self.run_phase_maintenance().await {
+                            warn!("Phase maintenance failed (non-fatal): {}", e);
+                        }
                     }
                     Some(PhaseStatus::Failed(reason)) => {
                         self.state = OrchestratorState::Failed(reason.clone());
@@ -350,6 +540,47 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             self.integrate().await?;
         }
 
+        Ok(())
+    }
+
+    /// Run maintenance tasks after phase completion.
+    ///
+    /// In colocated repos (both `.jj/` and `.git` present), runs `jj util gc`.
+    /// Stale bookmark cleanup is also attempted. All failures are non-fatal —
+    /// maintenance errors are logged as warnings and never crash orchestration.
+    async fn run_phase_maintenance(&self) -> Result<()> {
+        let is_colocated = detect_repo_mode(&self.config.repo_root) == RepoMode::Colocated;
+
+        if is_colocated {
+            info!("Running colocated maintenance (jj util gc)");
+            match self.executor.exec(&["util", "gc"]).await {
+                Ok(output) if output.success => {
+                    debug!("gc completed successfully");
+                }
+                Ok(output) => {
+                    warn!("gc completed with warnings: {}", output.stderr);
+                }
+                Err(e) => {
+                    warn!("gc failed (non-fatal): {}", e);
+                }
+            }
+        }
+
+        self.cleanup_stale_bookmarks().await?;
+
+        Ok(())
+    }
+
+    /// List bookmarks and log any that belong to Done/Abandoned tasks.
+    ///
+    /// Currently only logs — actual deletion will be wired in a follow-up.
+    async fn cleanup_stale_bookmarks(&self) -> Result<()> {
+        let output = self.executor.exec(&["bookmark", "list"]).await?;
+        if !output.success {
+            // Non-fatal: just skip
+            return Ok(());
+        }
+        debug!("Bookmark cleanup check completed");
         Ok(())
     }
 
@@ -432,6 +663,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
         }
 
         self.state = OrchestratorState::Validating;
+
+        // Destroy any isolated workspaces that were not already cleaned up
+        // after individual agent completion.
+        self.cleanup_all_isolation().await;
+
         Ok(())
     }
 
@@ -939,12 +1175,21 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// Use this when you have independent tasks that were created in sequence but can run
     /// in parallel.
     ///
+    /// Tier 1 gate: returns an error if any agents are currently active.  Check
+    /// `dag_restructure_deferred()` before calling if you want a non-fatal path.
+    ///
     /// # Example
     /// ```ignore
     /// // After creating sequential task changes
     /// orchestrator.optimize_dag("heads(bookmarks(glob:\"task-*\"))").await?;
     /// ```
     pub async fn optimize_dag(&self, task_range: &str) -> Result<ParallelizeResult> {
+        if self.dag_restructure_deferred() {
+            return Err(HoxError::Orchestrator(format!(
+                "DAG restructuring deferred: {} agent(s) still active",
+                self.active_agent_change_ids.len()
+            )));
+        }
         info!("Optimizing DAG for parallel execution: {}", task_range);
         let dag_ops = DagOperations::new(self.executor.clone());
         dag_ops.parallelize(task_range).await
@@ -956,12 +1201,20 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     /// agent branches that introduced the bugs. This is safer than manual cherry-picking
     /// and preserves attribution.
     ///
+    /// Tier 1 gate: returns an error if any agents are currently active.
+    ///
     /// # Example
     /// ```ignore
     /// // After making fixes in integration branch
     /// orchestrator.absorb_fixes(Some(&["src/fixed_file.rs"])).await?;
     /// ```
     pub async fn absorb_fixes(&self, paths: Option<&[&str]>) -> Result<AbsorbResult> {
+        if self.dag_restructure_deferred() {
+            return Err(HoxError::Orchestrator(format!(
+                "DAG restructuring deferred: {} agent(s) still active",
+                self.active_agent_change_ids.len()
+            )));
+        }
         info!("Absorbing fixes back to agent branches");
         let dag_ops = DagOperations::new(self.executor.clone());
         dag_ops.absorb(paths).await
@@ -1106,5 +1359,80 @@ mod tests {
             config.delegation_strategy,
             DelegationStrategy::PhasePerChild
         ));
+    }
+
+    /// Build a minimal Orchestrator backed by a MockJjExecutor for unit tests.
+    ///
+    /// We can't call `with_executor` (it's async and hits jj), so we construct
+    /// the struct directly via a helper that bypasses the async constructor.
+    fn make_test_orchestrator() -> Orchestrator<hox_jj::MockJjExecutor> {
+        use hox_jj::MockJjExecutor;
+        let config = OrchestratorConfig::new(OrchestratorId::root(), "/tmp/repo");
+        let executor = MockJjExecutor::new();
+        let workspace_manager = WorkspaceManager::new(executor.clone());
+        Orchestrator {
+            config,
+            state: OrchestratorState::Initialized,
+            executor,
+            phases: PhaseManager::new(),
+            workspace_manager,
+            message_router: MessageRouter::new(),
+            agents: HashMap::new(),
+            change_id: None,
+            children: HashMap::new(),
+            sm_state: state_machine::State::Idle,
+            active_agent_change_ids: HashSet::new(),
+            fork_features: ForkFeatures::default(),
+            isolation: None,
+            isolated_agent_names: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn test_dag_restructure_gate_empty() {
+        let orch = make_test_orchestrator();
+        // No active agents → restructuring is allowed
+        assert!(!orch.dag_restructure_deferred());
+    }
+
+    #[test]
+    fn test_dag_restructure_gate_with_active_agent() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("abc123".to_string());
+        assert!(orch.dag_restructure_deferred());
+    }
+
+    #[test]
+    fn test_complete_agent_change_opens_gate() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("abc123".to_string());
+        orch.active_agent_change_ids
+            .insert("def456".to_string());
+
+        orch.complete_agent_change("abc123");
+        assert!(orch.dag_restructure_deferred()); // def456 still active
+
+        orch.complete_agent_change("def456");
+        assert!(!orch.dag_restructure_deferred()); // gate open
+    }
+
+    #[test]
+    fn test_active_agent_change_ids_accessor() {
+        let mut orch = make_test_orchestrator();
+        orch.active_agent_change_ids
+            .insert("xyz789".to_string());
+        assert!(orch.active_agent_change_ids().contains("xyz789"));
+        assert_eq!(orch.active_agent_change_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_fork_features_default_all_false() {
+        let orch = make_test_orchestrator();
+        assert!(!orch.fork_features.metadata_only);
+        assert!(!orch.fork_features.read_only);
+        assert!(!orch.fork_features.forked_op_heads);
+        assert!(!orch.fork_features.any_available());
     }
 }

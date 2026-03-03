@@ -18,6 +18,7 @@ const els = {
     uptime: null,
     connectionDot: null,
     connectionLabel: null,
+    viewModeBadge: null,
     phaseProgress: null,
     metricsPanel: null,
     metricTools: null,
@@ -96,13 +97,16 @@ export function initHud(containerEl) {
     bookmarkSpan.innerHTML = '<span class="label">Branch:</span> <span class="value" id="session-bookmark">--</span>';
     sessionInfo.append(sessionIdSpan, bookmarkSpan);
 
+    // View mode badge (center of top bar)
+    const viewModeBadge = createElement('div', { id: 'view-mode-badge', className: 'view-mode-badge', textContent: 'ORCH VIEW' });
+
     const rightSection = createElement('div', { className: 'connection-status' });
     const uptimeSpan = createElement('span', { id: 'uptime', className: 'text-dim', textContent: '0s' });
     const connDot = createElement('span', { id: 'connection-dot', className: 'connection-dot' });
     const connLabel = createElement('span', { id: 'connection-label', className: 'connection-label', textContent: '--' });
     rightSection.append(uptimeSpan, connDot, connLabel);
 
-    topBar.append(titleSpan, sessionInfo, rightSection);
+    topBar.append(titleSpan, sessionInfo, viewModeBadge, rightSection);
     container.appendChild(topBar);
 
     // Phase Progress
@@ -178,6 +182,7 @@ export function initHud(containerEl) {
     els.uptime = document.getElementById('uptime');
     els.connectionDot = document.getElementById('connection-dot');
     els.connectionLabel = document.getElementById('connection-label');
+    els.viewModeBadge = viewModeBadge;
     els.phaseProgress = phaseProgress;
     els.metricsPanel = metricsPanel;
     els.metricTools = document.getElementById('metric-tools');
@@ -475,7 +480,61 @@ function showDetailPanel(node) {
         }
     }
 
-    // Phase indicator
+    // DAG node types: change, file, merge, root
+    if (node.node_type === 'change') {
+        if (node.change_id) {
+            html += `
+                <div class="detail-section">
+                    <div class="section-label">Change ID</div>
+                    <div style="font-size: 11px; color: #888888; font-family: 'JetBrains Mono', monospace; word-break: break-all;">${escapeHtml(node.change_id)}</div>
+                </div>
+            `;
+        }
+        if (node.bookmarks && node.bookmarks.length > 0) {
+            html += `
+                <div class="detail-section">
+                    <div class="section-label">Bookmarks</div>
+                    ${node.bookmarks.map(bm => `<div style="font-size: 12px; color: #ffff00; padding: 2px 0;">${escapeHtml(bm)}</div>`).join('')}
+                </div>
+            `;
+        }
+        if (node.files && node.files.length > 0) {
+            html += `
+                <div class="detail-section">
+                    <div class="section-label">Files (${node.files.length})</div>
+                    <div style="max-height: 120px; overflow-y: auto;">
+                        ${node.files.map(f => `<div style="font-size: 11px; color: #00cc99; padding: 1px 0; font-family: 'JetBrains Mono', monospace;">${escapeHtml(f)}</div>`).join('')}
+                    </div>
+                </div>
+            `;
+        }
+        if (node.agent) {
+            html += `
+                <div class="detail-section">
+                    <div class="section-label">Assigned Agent</div>
+                    <div style="font-size: 12px; color: #00ffff;">${escapeHtml(node.agent)}</div>
+                </div>
+            `;
+        }
+    } else if (node.node_type === 'file') {
+        if (node.path) {
+            html += `
+                <div class="detail-section">
+                    <div class="section-label">Path</div>
+                    <div style="font-size: 11px; color: #00cc99; font-family: 'JetBrains Mono', monospace; word-break: break-all;">${escapeHtml(node.path)}</div>
+                </div>
+            `;
+        }
+        if (node.touch_count != null) {
+            html += `<div class="metric-row"><span class="metric-label">Touch Count</span><span class="metric-value">${formatNumber(node.touch_count)}</span></div>`;
+        }
+    } else if (node.node_type === 'merge') {
+        if (node.change_id) {
+            html += `<div style="font-size: 11px; color: #888888; font-family: 'JetBrains Mono', monospace; word-break: break-all; margin-top: 4px;">${escapeHtml(node.change_id)}</div>`;
+        }
+    }
+
+    // Phase indicator (orchestration nodes)
     if (node.phase != null) {
         html += `<div style="font-size: 10px; color: #666666; margin-top: 8px;">Phase ${node.phase}</div>`;
     }
@@ -487,6 +546,23 @@ function showDetailPanel(node) {
 export function hideDetailPanel() {
     if (els.detailPanel) els.detailPanel.classList.remove('visible');
     if (els.metricsPanel) els.metricsPanel.style.display = '';
+}
+
+// ── View Mode Badge ──
+
+/**
+ * Update the view mode indicator badge in the top bar.
+ * @param {'orchestration'|'dag'} mode
+ */
+export function setViewModeBadge(mode) {
+    if (!els.viewModeBadge) return;
+    if (mode === 'dag') {
+        els.viewModeBadge.textContent = 'DAG VIEW';
+        els.viewModeBadge.className = 'view-mode-badge dag';
+    } else {
+        els.viewModeBadge.textContent = 'ORCH VIEW';
+        els.viewModeBadge.className = 'view-mode-badge orch';
+    }
 }
 
 // ── Connection Status ──

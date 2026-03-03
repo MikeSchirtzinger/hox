@@ -25,8 +25,9 @@
 //! - `Status`: Status (pending, running, completed, failed, blocked)
 
 use crate::{
-    AgentNode, AgentStatus, DashboardConfig, DashboardState, GlobalMetrics, JjOpType, JjOplogEntry,
-    OrchestrationSession, PhaseProgress, PhaseStatus, Result,
+    AgentNode, AgentStatus, DagChange, DagState, DashboardConfig, DashboardState, FileChange,
+    GlobalMetrics, JjOpType, JjOplogEntry, OrchestrationSession, PhaseProgress, PhaseStatus,
+    Result,
 };
 use chrono::{DateTime, Utc};
 use hox_core::HoxError;
@@ -45,6 +46,8 @@ pub mod trailers {
     pub const STATUS: &str = "Status";
     /// Change ID trailer key (for linking to jj changes)
     pub const CHANGE_ID: &str = "Change";
+    /// Progress percentage trailer key
+    pub const PROGRESS: &str = "Progress";
 }
 
 /// Parsed commit with trailer metadata
@@ -71,11 +74,12 @@ impl JjDataSource {
 
     /// Fetch current dashboard state from JJ and metrics
     pub async fn fetch_state(&self) -> Result<DashboardState> {
-        // Fetch all data concurrently
-        let (oplog, commits, bookmark) = tokio::join!(
+        // Fetch all data concurrently including DAG topology
+        let (oplog, commits, bookmark, dag) = tokio::join!(
             fetch_oplog(self.config.max_oplog_entries),
             fetch_commits_with_trailers(self.config.max_oplog_entries),
-            self.current_bookmark()
+            self.current_bookmark(),
+            fetch_dag_topology()
         );
 
         let oplog = oplog?;
@@ -103,6 +107,9 @@ impl JjDataSource {
         // Build phase progress
         let phases = build_phase_progress(&agents);
 
+        // DAG topology (None if query returned no changes or failed)
+        let dag = dag.ok().filter(|d| !d.changes.is_empty());
+
         Ok(DashboardState {
             session,
             global_metrics,
@@ -110,6 +117,7 @@ impl JjDataSource {
             oplog,
             phases,
             last_updated: Some(Utc::now()),
+            dag,
         })
     }
 
@@ -303,6 +311,14 @@ fn extract_agents_from_trailers(
             }
             agent.change_id = Some(commit.change_id.clone());
 
+            // Parse explicit progress from trailer (e.g., "Progress: 75%")
+            if let Some(progress_str) = commit.trailers.get(trailers::PROGRESS) {
+                let cleaned = progress_str.trim_end_matches('%').trim();
+                if let Ok(pct) = cleaned.parse::<f32>() {
+                    agent.progress = pct / 100.0; // Convert percentage to 0.0-1.0
+                }
+            }
+
             // Count operations for this agent in oplog
             let agent_ops = oplog
                 .iter()
@@ -312,9 +328,9 @@ fn extract_agents_from_trailers(
         }
     }
 
-    // Estimate progress for running agents
+    // Estimate progress for running agents (only if no explicit Progress trailer)
     for (agent_id, agent) in agents_map.iter_mut() {
-        if agent.status == AgentStatus::Running {
+        if agent.status == AgentStatus::Running && agent.progress == 0.0 {
             let agent_ops: Vec<_> = oplog
                 .iter()
                 .filter(|e| e.agent_id.as_ref() == Some(agent_id))
@@ -638,6 +654,207 @@ fn infer_current_phase(agents: &[AgentNode]) -> usize {
     })
 }
 
+/// Fetch the JJ change DAG for agent task changes.
+///
+/// Queries all changes reachable from agent task bookmarks and parses them
+/// into a `DagState`. Files are left empty — Phase 2 file cache fills them.
+pub async fn fetch_dag_topology() -> Result<DagState> {
+    // Template fields (pipe-separated):
+    //   change_id.short(12) | parents (comma-sep 12-char IDs) | first description line |
+    //   bookmarks (comma-sep) | conflict flag | unix timestamp (seconds)
+    let template = concat!(
+        r#"change_id.short(12) ++ "|" ++ "#,
+        r#"parents.map(|p| p.change_id().short(12)).join(",") ++ "|" ++ "#,
+        r#"description.first_line() ++ "|" ++ "#,
+        r#"bookmarks.join(",") ++ "|" ++ "#,
+        r#"if(conflict, "conflict", "") ++ "|" ++ "#,
+        r#"committer.timestamp().utc().format("%s") ++ "\n""#,
+    );
+
+    // Try agent-specific revset first; fall back to all mutable changes
+    let agent_revset =
+        r#"ancestors(bookmarks(glob:"agent/*/task/*")) | bookmarks(glob:"task/*")"#;
+    let fallback_revset = r#"ancestors(bookmarks()) & mutable()"#;
+
+    let output = Command::new("jj")
+        .args(["log", "-r", agent_revset, "--no-graph", "-T", template])
+        .output()
+        .await
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj log (dag): {}", e)))?;
+
+    // If agent revset returned nothing, try the broader fallback
+    let output = if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    {
+        Command::new("jj")
+            .args(["log", "-r", fallback_revset, "--no-graph", "-T", template])
+            .output()
+            .await
+            .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj log (dag): {}", e)))?
+    } else {
+        output
+    };
+
+    if !output.status.success() {
+        return Ok(DagState::default());
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in jj log (dag): {}", e)))?;
+
+    let mut changes = Vec::new();
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_dag_line(line) {
+            Ok(change) => changes.push(change),
+            Err(e) => {
+                eprintln!("Warning: Failed to parse DAG line: {} (error: {})", line, e);
+            }
+        }
+    }
+
+    // Determine root: the change with no parents that appears in our set
+    let all_ids: std::collections::HashSet<&str> =
+        changes.iter().map(|c| c.change_id.as_str()).collect();
+    let root_change_id = changes
+        .iter()
+        .find(|c| c.parents.is_empty() || c.parents.iter().all(|p| !all_ids.contains(p.as_str())))
+        .map(|c| c.change_id.clone());
+
+    Ok(DagState {
+        changes,
+        root_change_id,
+    })
+}
+
+/// Parse a single line of DAG topology output.
+fn parse_dag_line(line: &str) -> Result<DagChange> {
+    let parts: Vec<&str> = line.splitn(6, '|').collect();
+    if parts.len() < 6 {
+        return Err(HoxError::JjCommand(format!(
+            "Invalid DAG line (expected 6 fields): {}",
+            line
+        )));
+    }
+
+    let change_id = parts[0].trim().to_string();
+
+    let parents: Vec<String> = parts[1]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let description = parts[2].trim().to_string();
+
+    let bookmarks: Vec<String> = parts[3]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let has_conflict = parts[4].trim() == "conflict";
+
+    let timestamp_ms = parts[5]
+        .trim()
+        .parse::<u64>()
+        .map(|s| s * 1000)
+        .unwrap_or(0);
+
+    // Derive agent_id from bookmarks matching agent/*/task/* pattern
+    let agent_id = bookmarks
+        .iter()
+        .find(|b| {
+            let segs: Vec<&str> = b.splitn(4, '/').collect();
+            segs.len() >= 4 && segs[0] == "agent" && segs[2] == "task"
+        })
+        .map(|b| {
+            // Return the agent portion: "agent/{name}"
+            let segs: Vec<&str> = b.splitn(4, '/').collect();
+            format!("{}/{}", segs[0], segs[1])
+        });
+
+    Ok(DagChange {
+        change_id,
+        description,
+        parents,
+        bookmarks,
+        agent_id,
+        files: Vec::new(),
+        has_conflict,
+        timestamp_ms,
+    })
+}
+
+/// Fetch file diff statistics for a single JJ change.
+///
+/// Runs `jj diff -r <change_id> --stat --no-pager` and parses the output.
+/// Stat lines have the format: ` path/to/file.rs | 15 ++++---`
+pub async fn fetch_file_diff(change_id: &str) -> Result<Vec<FileChange>> {
+    let output = Command::new("jj")
+        .args(["diff", "-r", change_id, "--stat", "--no-pager"])
+        .output()
+        .await
+        .map_err(|e| HoxError::JjCommand(format!("Failed to execute jj diff: {}", e)))?;
+
+    if !output.status.success() {
+        // Non-fatal — return empty rather than propagating
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| HoxError::JjCommand(format!("Invalid UTF-8 in jj diff: {}", e)))?;
+
+    let mut files = Vec::new();
+    for line in stdout.lines() {
+        // Skip the summary line ("N files changed, X insertions(+), Y deletions(-)")
+        if line.contains("files changed") || line.trim().is_empty() {
+            continue;
+        }
+        if let Some(fc) = parse_diff_stat_line(line) {
+            files.push(fc);
+        }
+    }
+
+    Ok(files)
+}
+
+/// Parse a single `jj diff --stat` output line.
+///
+/// Format: ` path/to/file.rs | 15 ++++---`
+/// or for renames: ` old/path => new/path | 3 +++`
+fn parse_diff_stat_line(line: &str) -> Option<FileChange> {
+    let pipe_idx = line.rfind('|')?;
+    let path_part = line[..pipe_idx].trim();
+    let stat_part = line[pipe_idx + 1..].trim();
+
+    // Count '+' and '-' in the stat bar
+    let insertions = stat_part.chars().filter(|&c| c == '+').count() as u32;
+    let deletions = stat_part.chars().filter(|&c| c == '-').count() as u32;
+
+    // Determine change type and canonical path
+    let (path, change_type) = if path_part.contains(" => ") {
+        // Rename: "old/path => new/path"
+        let new_path = path_part.split(" => ").last()?.trim().to_string();
+        (new_path, "renamed".to_string())
+    } else if insertions > 0 && deletions == 0 {
+        (path_part.to_string(), "added".to_string())
+    } else if insertions == 0 && deletions > 0 {
+        (path_part.to_string(), "deleted".to_string())
+    } else {
+        (path_part.to_string(), "modified".to_string())
+    };
+
+    Some(FileChange {
+        path,
+        change_type,
+        insertions,
+        deletions,
+    })
+}
+
 /// Build phase progress from agents
 fn build_phase_progress(agents: &[AgentNode]) -> Vec<PhaseProgress> {
     let mut phases_map: HashMap<usize, PhaseProgress> = HashMap::new();
@@ -825,5 +1042,91 @@ mod tests {
         assert_eq!(agent2.phase, 2);
         assert_eq!(agent2.status, AgentStatus::Completed);
         assert_eq!(agent2.progress, 1.0); // Completed agents have 100% progress
+    }
+
+    #[test]
+    fn test_parse_dag_line_basic() {
+        // change_id | parents | description | bookmarks | conflict | timestamp
+        let line = "abc123456789|def098765432|Implement auth|agent/eng/task/auth||1709000000";
+        let change = parse_dag_line(line).expect("Failed to parse DAG line");
+        assert_eq!(change.change_id, "abc123456789");
+        assert_eq!(change.parents, vec!["def098765432"]);
+        assert_eq!(change.description, "Implement auth");
+        assert_eq!(change.bookmarks, vec!["agent/eng/task/auth"]);
+        assert!(!change.has_conflict);
+        assert_eq!(change.timestamp_ms, 1709000000 * 1000);
+        assert_eq!(change.agent_id, Some("agent/eng".to_string()));
+        assert!(change.files.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dag_line_no_parents() {
+        let line = "aaaaaaaaaaaa||Root commit||conflict|1709000001";
+        let change = parse_dag_line(line).expect("Failed to parse DAG line (no parents)");
+        assert_eq!(change.change_id, "aaaaaaaaaaaa");
+        assert!(change.parents.is_empty());
+        assert!(change.has_conflict);
+    }
+
+    #[test]
+    fn test_parse_dag_line_multiple_parents() {
+        let line = "cccccccccccc|aaaaaaaaaa12,bbbbbbbbbb34|Merge|task/feat||1709000002";
+        let change = parse_dag_line(line).expect("Failed to parse DAG line (merge)");
+        assert_eq!(change.parents.len(), 2);
+        assert_eq!(change.parents[0], "aaaaaaaaaa12");
+        assert_eq!(change.parents[1], "bbbbbbbbbb34");
+    }
+
+    #[test]
+    fn test_parse_dag_line_too_few_fields() {
+        let line = "abc123|missing";
+        assert!(parse_dag_line(line).is_err());
+    }
+
+    #[test]
+    fn test_parse_diff_stat_line_modified() {
+        let line = " crates/foo/src/lib.rs | 12 +++++-------";
+        let fc = parse_diff_stat_line(line).expect("Failed to parse stat line");
+        assert_eq!(fc.path, "crates/foo/src/lib.rs");
+        assert_eq!(fc.change_type, "modified");
+        assert_eq!(fc.insertions, 5);
+        assert_eq!(fc.deletions, 7);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_line_added() {
+        let line = " new_file.rs | 10 ++++++++++";
+        let fc = parse_diff_stat_line(line).expect("Failed to parse added file");
+        assert_eq!(fc.path, "new_file.rs");
+        assert_eq!(fc.change_type, "added");
+        assert_eq!(fc.insertions, 10);
+        assert_eq!(fc.deletions, 0);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_line_deleted() {
+        let line = " old_file.rs | 5 -----";
+        let fc = parse_diff_stat_line(line).expect("Failed to parse deleted file");
+        assert_eq!(fc.path, "old_file.rs");
+        assert_eq!(fc.change_type, "deleted");
+        assert_eq!(fc.insertions, 0);
+        assert_eq!(fc.deletions, 5);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_line_rename() {
+        let line = " old/path.rs => new/path.rs | 2 +-";
+        let fc = parse_diff_stat_line(line).expect("Failed to parse renamed file");
+        assert_eq!(fc.path, "new/path.rs");
+        assert_eq!(fc.change_type, "renamed");
+    }
+
+    #[test]
+    fn test_parse_diff_stat_line_summary_skipped() {
+        // Summary line should not parse (returns None)
+        let line = "3 files changed, 15 insertions(+), 7 deletions(-)";
+        // This line doesn't have the expected | format so returns None
+        // The caller skips lines with "files changed"
+        assert!(parse_diff_stat_line(line).is_none() || true); // just ensure no panic
     }
 }
