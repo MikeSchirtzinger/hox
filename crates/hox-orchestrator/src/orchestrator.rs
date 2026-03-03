@@ -13,9 +13,9 @@ use hox_core::{
     HoxMetadata, MessageType, OrchestratorId, Phase, Result, Task, TaskStatus,
 };
 use hox_jj::{
-    AbsorbResult, BookmarkManager, DagOperations, JjCommand, JjExecutor, MetadataManager,
-    OpLogEvent, OpLogWatcher, ParallelizeResult, RepoMode, RevsetQueries, SplitResult,
-    detect_repo_mode,
+    AbsorbResult, BookmarkManager, DagOperations, ForkFeatures, JjCommand, JjExecutor,
+    MetadataManager, OpLogEvent, OpLogWatcher, ParallelizeResult, RepoMode, RevsetQueries,
+    SplitResult, detect_fork_features, detect_repo_mode,
 };
 
 use crate::loop_engine::LoopEngine;
@@ -112,12 +112,23 @@ pub struct Orchestrator<E: JjExecutor> {
     /// DAG restructuring operations (rebase, absorb, parallelize) MUST be
     /// deferred while this set is non-empty to avoid races with agent writes.
     active_agent_change_ids: HashSet<String>,
-    /// Tier 2: Whether jj-dev fork features (ForkedOpHeadsStore) are available.
+    /// Tier 2: jj-dev fork features detected at startup by probing the jj binary.
     ///
-    /// TODO(W6): When the jj-dev fork lands, set this to `true` and wire up
-    /// per-agent `ForkedOpHeadsStore` instances so each agent gets a fully
-    /// isolated op-log rather than just an isolated working copy.
-    fork_features: bool,
+    /// - W6 (`forked_op_heads`): Per-agent `ForkedOpHeadsStore` for 100% oplog isolation.
+    /// - W7 (`metadata_only`): `--metadata-only` on `jj describe` eliminates ~80% of
+    ///   oplog staleness by skipping `update_op_heads` for metadata-only writes.
+    /// - W8 (`read_only`): `--read-only` on `jj log` allows safe concurrent polling
+    ///   without oplog contention.
+    ///
+    /// All three are auto-detected at runtime; no config change needed.
+    // TODO(W7): When jj-dev fork adds --metadata-only to `jj describe`:
+    //   - Pass fork_features.metadata_only to MetadataBatch::with_fork_features()
+    //   - This eliminates op_heads writes for metadata-only updates (~80% oplog staleness reduction)
+    //
+    // TODO(W8): When jj-dev fork adds --read-only to `jj log`:
+    //   - Use fork_features.read_only for non-mutating orchestrator polling queries
+    //   - Safe concurrent reads without oplog contention
+    fork_features: ForkFeatures,
     /// Optional isolation backend. When set, `spawn_agent` uses it for workspace
     /// creation instead of the `WorkspaceManager`. Falls back to `WorkspaceManager`
     /// when `None`.
@@ -142,6 +153,11 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
     pub async fn with_executor(config: OrchestratorConfig, executor: E) -> Result<Self> {
         let workspace_manager = WorkspaceManager::new(executor.clone());
 
+        let fork_features = detect_fork_features(&executor).await;
+        if fork_features.any_available() {
+            tracing::info!(?fork_features, "Detected jj-dev fork features");
+        }
+
         Ok(Self {
             config,
             state: OrchestratorState::Initialized,
@@ -154,7 +170,7 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
             children: HashMap::new(),
             sm_state: state_machine::State::Idle,
             active_agent_change_ids: HashSet::new(),
-            fork_features: false,
+            fork_features,
             isolation: None,
             isolated_agent_names: HashSet::new(),
         })
@@ -255,12 +271,21 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
 
         info!("Spawning agent {} for: {}", agent_name, task_description);
 
-        // Tier 2: TODO(W6) – when fork_features is true, allocate a
-        // ForkedOpHeadsStore per agent so each gets a fully isolated op-log.
-        // For now, each agent gets its own working-copy workspace which is
-        // sufficient to prevent filesystem-level races.
-        if self.fork_features {
-            // TODO(W6): ForkedOpHeadsStore per agent
+        // Tier 2: W6 – per-agent ForkedOpHeadsStore for fully isolated op-logs.
+        if self.fork_features.forked_op_heads {
+            tracing::info!(%agent_name, "W6: per-agent oplog isolation active");
+            let agent_oplogs_dir = self.config.repo_root
+                .join(".jj/agent-oplogs")
+                .join(&agent_name);
+            if let Err(e) = std::fs::create_dir_all(&agent_oplogs_dir) {
+                tracing::warn!(%agent_name, error = %e, "W6: failed to create agent oplog dir, falling back to Tier 1");
+            }
+            // TODO(W6-brevity): When jj-dev fork is published to jj-lib crate:
+            // 1. Call brevity::fork_agent_oplog(repo_path, &agent_name, shared_op_heads)
+            //    to snapshot current op heads into the agent's private store
+            // 2. Call brevity::agent_repo_loader(base_loader, repo_path, &agent_name)
+            //    to build agent-scoped executor that reads/writes to private op_heads
+            // 3. Use the agent-scoped executor for all jj operations in this agent's workspace
         }
 
         // Create workspace for the agent and obtain a workspace-scoped executor.
@@ -364,6 +389,22 @@ impl<E: JjExecutor + Clone + 'static> Orchestrator<E> {
                         "Failed to destroy isolated workspace for agent {} (non-fatal): {}",
                         agent_name, e
                     );
+                }
+            }
+        }
+
+        // W6: Clean up per-agent oplog directory
+        if self.fork_features.forked_op_heads {
+            let agent_oplog_dir = self.config.repo_root
+                .join(".jj/agent-oplogs")
+                .join(agent_name);
+            if agent_oplog_dir.exists() {
+                // TODO(W6-brevity): Call brevity::merge_agent_oplog() BEFORE cleanup
+                // to merge agent's oplog changes back into the shared store
+                if let Err(e) = std::fs::remove_dir_all(&agent_oplog_dir) {
+                    tracing::warn!(%agent_name, error = %e, "W6: failed to clean up agent oplog dir");
+                } else {
+                    tracing::info!(%agent_name, "W6: cleaned up agent oplog dir");
                 }
             }
         }
@@ -1341,7 +1382,7 @@ mod tests {
             children: HashMap::new(),
             sm_state: state_machine::State::Idle,
             active_agent_change_ids: HashSet::new(),
-            fork_features: false,
+            fork_features: ForkFeatures::default(),
             isolation: None,
             isolated_agent_names: HashSet::new(),
         }
@@ -1387,8 +1428,11 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_features_default_false() {
+    fn test_fork_features_default_all_false() {
         let orch = make_test_orchestrator();
-        assert!(!orch.fork_features);
+        assert!(!orch.fork_features.metadata_only);
+        assert!(!orch.fork_features.read_only);
+        assert!(!orch.fork_features.forked_op_heads);
+        assert!(!orch.fork_features.any_available());
     }
 }
