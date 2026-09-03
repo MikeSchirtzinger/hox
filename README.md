@@ -2,7 +2,7 @@
 
 **Your VCS is the orchestration layer.**
 
-Named after [Hox genes](https://en.wikipedia.org/wiki/Hox_gene) — the master regulators behind the Cambrian explosion — Hox is a multi-agent orchestration system built on [jj](https://martinvonz.github.io/jj/). It turns your version control graph into a live task board where AI agents coordinate through changes, bookmarks, and DAG topology instead of databases or message queues.
+Named after [Hox genes](https://en.wikipedia.org/wiki/Hox_gene), the master regulators behind the Cambrian explosion, Hox is a multi-agent orchestration system built on [jj](https://martinvonz.github.io/jj/). It turns your version control graph into a live task board where AI agents coordinate through changes, bookmarks, and DAG topology instead of databases or message queues.
 
 ```
 Tasks       = jj changes         (change IDs are the primary key)
@@ -50,7 +50,7 @@ The core execution engine. Each iteration:
 ```
 ┌─ Read context from jj change description (HandoffContext)
 │
-├─ Run backpressure checks (build, lint, test — auto-detected per language)
+├─ Run backpressure checks (build, lint, test, auto-detected per language)
 │
 ├─ Build prompt: task + context + errors from last iteration
 │
@@ -88,7 +88,7 @@ hox orchestrate "Build authentication system" --orchestrators 2 --max-agents 4
 hox orchestrate plan.md --delegate
 ```
 
-Each agent gets an isolated jj workspace. No merge conflicts between concurrent agents — jj handles that natively.
+Each agent gets an isolated jj workspace. No merge conflicts between concurrent agents, since jj handles that natively.
 
 ### Agent Communication
 
